@@ -1,0 +1,10 @@
+{
+  "name": "pi-extensions",
+  "version": "0.1.0",
+  "description": "Personal pi extensions: permission-gate, todo, subagent",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
