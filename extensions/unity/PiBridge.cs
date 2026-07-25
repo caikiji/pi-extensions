@@ -47,7 +47,7 @@ namespace PiBridge
         private const int DefaultPort = 17841;
         private const int MaxPortAttempts = 20;
         private const string PortFileName = "pi-bridge-port";
-        private const string BridgeVersion = "0.2.0";
+        private const string BridgeVersion = "0.2.1";
 
         // When true (default), the bridge brings Unity to the foreground before
         // dispatching a command, to bypass the ~1Hz delayCall throttle that
@@ -226,21 +226,38 @@ namespace PiBridge
         // aborts the fetch and returns a clear error to the AI.
         private static Response DispatchToMainThread(string command, string body, int timeoutSeconds = 120)
         {
+            // Bring Unity to the foreground BEFORE queuing the delayCall.
+            // delayCall is itself throttled when Unity is unfocused (~1Hz), so if we
+            // focused from inside the callback we'd be stuck waiting for the very
+            // throttle we're trying to defeat. The HTTP thread is not throttled, so
+            // focusing here is immediate; by the time the delayCall callback runs,
+            // Unity is already in the foreground and executes at full speed.
+            // This is unconditional: if Unity is already focused, SetForegroundWindow
+            // is a harmless no-op. (AutoFocus can be disabled via the config command.)
+            if (AutoFocusEnabled)
+            {
+                try { WindowFocus.BringUnityToFront(); }
+                catch { /* best-effort */ }
+                // Give the OS a moment to complete the foreground switch before we
+                // queue the main-thread work; otherwise the first delayCall tick may
+                // still land while Unity hasn't been raised yet.
+                System.Threading.Thread.Sleep(80);
+            }
+
             var done = new ManualResetEventSlim(false);
             Response response = null;
 
             EditorApplication.delayCall += () =>
             {
-                // Running on the main thread now. If the Editor is unfocused, bring
-                // it to the foreground first so ExecuteCommand (and any subsequent
-                // delayCall ticks) run at full speed instead of the throttled ~1Hz.
-                // This runs inside delayCall, so the first tick still waits for the
-                // throttle — but once focused, execution is immediate.
+                // Fallback: re-check focus on the main thread (the authoritative
+                // source via InternalEditorUtility). Covers the race where the
+                // background-thread focus didn't take (e.g. foreground lock held).
                 try
                 {
                     if (AutoFocusEnabled && !InternalEditorUtility.isApplicationActive)
                     {
                         WindowFocus.BringUnityToFront();
+                        System.Threading.Thread.Sleep(30); // let the raise settle
                     }
                 }
                 catch { /* best-effort; don't block the command */ }
@@ -682,6 +699,9 @@ namespace PiBridge
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
 
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr hWnd);
+
         private const int SW_RESTORE = 9;
 #endif
 
@@ -730,22 +750,22 @@ namespace PiBridge
         // Find the Unity main window handle. Cached after first success.
         private static IntPtr GetUnityHwnd()
         {
-            if (_cachedHwnd != IntPtr.Zero) return _cachedHwnd;
-
 #if UNITY_EDITOR_WIN
+            // Validate the cached handle; window handles can become invalid after
+            // domain reload or if Unity recreates its main window.
+            if (_cachedHwnd != IntPtr.Zero && IsWindow(_cachedHwnd))
+                return _cachedHwnd;
+            _cachedHwnd = IntPtr.Zero;
+
             try
             {
-                // The Editor's main window hosts the Unity process. Find a top-level
-                // window belonging to the current process with a non-empty title.
-                var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
-                foreach (var proc in System.Diagnostics.Process.GetProcesses())
+                // The current process's MainWindowHandle is the Editor's main window.
+                // Refresh to pick up the latest handle (it can change after reload).
+                var proc = System.Diagnostics.Process.GetCurrentProcess();
+                proc.Refresh();
+                if (!string.IsNullOrEmpty(proc.MainWindowTitle) && proc.MainWindowHandle != IntPtr.Zero)
                 {
-                    if (proc.Id != currentProcess.Id) continue;
-                    if (!string.IsNullOrEmpty(proc.MainWindowTitle))
-                    {
-                        _cachedHwnd = proc.MainWindowHandle;
-                        break;
-                    }
+                    _cachedHwnd = proc.MainWindowHandle;
                 }
             }
             catch { }
