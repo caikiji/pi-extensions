@@ -32,9 +32,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 
 namespace PiBridge
@@ -45,7 +47,13 @@ namespace PiBridge
         private const int DefaultPort = 17841;
         private const int MaxPortAttempts = 20;
         private const string PortFileName = "pi-bridge-port";
-        private const string BridgeVersion = "0.1.0";
+        private const string BridgeVersion = "0.2.0";
+
+        // When true (default), the bridge brings Unity to the foreground before
+        // dispatching a command, to bypass the ~1Hz delayCall throttle that
+        // applies when the Editor is unfocused. Disable via the 'config' command
+        // if you don't want the window stealing focus.
+        private static bool AutoFocusEnabled = true;
 
         private static HttpListener _listener;
         private static Thread _thread;
@@ -203,6 +211,13 @@ namespace PiBridge
         // Dispatch a command to the main thread and block until it completes.
         // Uses delayCall; the calling (background) thread waits on a signal.
         //
+        // BACKGROUND FOCUS WORKAROUND: Unity throttles EditorApplication.update
+        // and delayCall to ~1Hz when the Editor window loses focus. To avoid
+        // multi-second stalls, we bring Unity to the foreground before queueing
+        // delayCall when the Editor is unfocused. This is the same approach used
+        // by other Unity MCP bridges (e.g. unity-mcp-sharp). Controlled by the
+        // autoFocus setting (default on); Linux/macOS skip the Win32 call.
+        //
         // timeoutSeconds caps the wait. NOTE: if the main thread is blocked by a
         // modal dialog (e.g. from ExecuteMenuItem), the HTTP response may not be
         // deliverable even after this timeout fires — Unity's HttpListener
@@ -216,6 +231,20 @@ namespace PiBridge
 
             EditorApplication.delayCall += () =>
             {
+                // Running on the main thread now. If the Editor is unfocused, bring
+                // it to the foreground first so ExecuteCommand (and any subsequent
+                // delayCall ticks) run at full speed instead of the throttled ~1Hz.
+                // This runs inside delayCall, so the first tick still waits for the
+                // throttle — but once focused, execution is immediate.
+                try
+                {
+                    if (AutoFocusEnabled && !InternalEditorUtility.isApplicationActive)
+                    {
+                        WindowFocus.BringUnityToFront();
+                    }
+                }
+                catch { /* best-effort; don't block the command */ }
+
                 try
                 {
                     response = ExecuteCommand(command, body);
@@ -246,6 +275,8 @@ namespace PiBridge
             switch (command.ToLowerInvariant())
             {
                 case "ping":
+                {
+                    bool appActive = InternalEditorUtility.isApplicationActive;
                     return new Response
                     {
                         ok = true,
@@ -255,8 +286,27 @@ namespace PiBridge
                             unityVersion = Application.unityVersion,
                             projectPath = Application.dataPath.Replace("/Assets", "").Replace("\\Assets", ""),
                             applicationPath = EditorApplication.applicationPath,
+                            autoFocus = AutoFocusEnabled,
+                            isApplicationActive = appActive,
                         }
                     };
+                }
+
+                case "config":
+                {
+                    // Query or change bridge settings. Currently supports autoFocus.
+                    //   { }                          -> return current config
+                    //   { autoFocus: false }         -> disable auto-focus
+                    if (args != null && args.TryGetValue("autoFocus", out object afValue))
+                    {
+                        AutoFocusEnabled = afValue is bool b ? b : Convert.ToBoolean(afValue);
+                    }
+                    return new Response
+                    {
+                        ok = true,
+                        result = new { autoFocus = AutoFocusEnabled }
+                    };
+                }
 
                 case "refresh":
                     AssetDatabase.Refresh();
@@ -602,6 +652,105 @@ namespace PiBridge
                 try { _listener?.Stop(); } catch { }
                 _listener = null;
             }
+        }
+    }
+
+    // Brings the Unity Editor window to the foreground so the main thread runs
+    // at full speed (bypassing the ~1Hz delayCall throttle when unfocused).
+    // Windows-only P/Invoke; no-ops on macOS/Linux where the throttle is less
+    // aggressive and SetForegroundWindow is unavailable.
+    internal static class WindowFocus
+    {
+        private static IntPtr _cachedHwnd = IntPtr.Zero;
+
+#if UNITY_EDITOR_WIN
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
+
+        private const int SW_RESTORE = 9;
+#endif
+
+        public static void BringUnityToFront()
+        {
+#if UNITY_EDITOR_WIN
+            try
+            {
+                IntPtr hwnd = GetUnityHwnd();
+                if (hwnd == IntPtr.Zero) return;
+
+                // Restore if minimized, so SetForegroundWindow can take effect.
+                ShowWindow(hwnd, SW_RESTORE);
+
+                // Windows restricts SetForegroundWindow from background threads.
+                // AttachThreadInput to the foreground thread briefly to bypass the
+                // foreground lock, then detach. This is the standard workaround.
+                IntPtr fg = GetForegroundWindow();
+                if (fg != IntPtr.Zero)
+                {
+                    uint fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+                    uint ourThread = GetCurrentThreadId();
+                    if (fgThread != ourThread)
+                    {
+                        AttachThreadInput(ourThread, fgThread, true);
+                        SetForegroundWindow(hwnd);
+                        AttachThreadInput(ourThread, fgThread, false);
+                    }
+                    else
+                    {
+                        SetForegroundWindow(hwnd);
+                    }
+                }
+                else
+                {
+                    SetForegroundWindow(hwnd);
+                }
+            }
+            catch
+            {
+                // Focus manipulation is best-effort; never fail a command because of it.
+            }
+#endif
+        }
+
+        // Find the Unity main window handle. Cached after first success.
+        private static IntPtr GetUnityHwnd()
+        {
+            if (_cachedHwnd != IntPtr.Zero) return _cachedHwnd;
+
+#if UNITY_EDITOR_WIN
+            try
+            {
+                // The Editor's main window hosts the Unity process. Find a top-level
+                // window belonging to the current process with a non-empty title.
+                var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
+                foreach (var proc in System.Diagnostics.Process.GetProcesses())
+                {
+                    if (proc.Id != currentProcess.Id) continue;
+                    if (!string.IsNullOrEmpty(proc.MainWindowTitle))
+                    {
+                        _cachedHwnd = proc.MainWindowHandle;
+                        break;
+                    }
+                }
+            }
+            catch { }
+#endif
+            return _cachedHwnd;
         }
     }
 
