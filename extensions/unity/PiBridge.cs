@@ -235,14 +235,7 @@ namespace PiBridge
             // This is unconditional: if Unity is already focused, SetForegroundWindow
             // is a harmless no-op. (AutoFocus can be disabled via the config command.)
             if (AutoFocusEnabled)
-            {
-                try { WindowFocus.BringUnityToFront(); }
-                catch { /* best-effort */ }
-                // Give the OS a moment to complete the foreground switch before we
-                // queue the main-thread work; otherwise the first delayCall tick may
-                // still land while Unity hasn't been raised yet.
-                System.Threading.Thread.Sleep(80);
-            }
+                FocusUnity(80); // ms to let the OS complete the foreground switch
 
             var done = new ManualResetEventSlim(false);
             Response response = null;
@@ -252,15 +245,8 @@ namespace PiBridge
                 // Fallback: re-check focus on the main thread (the authoritative
                 // source via InternalEditorUtility). Covers the race where the
                 // background-thread focus didn't take (e.g. foreground lock held).
-                try
-                {
-                    if (AutoFocusEnabled && !InternalEditorUtility.isApplicationActive)
-                    {
-                        WindowFocus.BringUnityToFront();
-                        System.Threading.Thread.Sleep(30); // let the raise settle
-                    }
-                }
-                catch { /* best-effort; don't block the command */ }
+                if (AutoFocusEnabled && !InternalEditorUtility.isApplicationActive)
+                    FocusUnity(30);
 
                 try
                 {
@@ -283,6 +269,17 @@ namespace PiBridge
             }
 
             return response ?? new Response { ok = false, error = "No response from main thread." };
+        }
+
+        // Bring Unity to the foreground (best-effort) and pause briefly so the OS
+        // completes the foreground switch before the caller proceeds. The settleMs
+        // delay lets a subsequent delayCall tick / focus re-check observe Unity as
+        // active instead of racing the window raise.
+        private static void FocusUnity(int settleMs)
+        {
+            try { WindowFocus.BringUnityToFront(); }
+            catch { /* focus manipulation is best-effort; never fail a command */ }
+            if (settleMs > 0) System.Threading.Thread.Sleep(settleMs);
         }
 
         private static Response ExecuteCommand(string command, string body)
