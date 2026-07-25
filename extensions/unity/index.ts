@@ -226,6 +226,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Install PiBridge.cs into a Unity project (enables unity_command)",
 		promptGuidelines: [
 			"Use unity_install_bridge to set up PiBridge for a project before using unity_command. It only writes one file (Assets/Editor/PiBridge.cs) and backs up any existing version.",
+			"If unity_command reports a version mismatch (PiBridge outdated), call unity_install_bridge again to update PiBridge.cs — the extension and the C# bridge are versioned together.",
 			"After unity_install_bridge, tell the user to focus the Unity window (or reopen the project) so it recompiles and starts the bridge. Then verify with unity_command ping.",
 		],
 		parameters: unityInstallBridgeParams,
@@ -385,12 +386,23 @@ function formatUnityCommandResult(result: UnityCommandResult): string {
 	lines.push("");
 
 	if (!result.bridge.available) {
+		// Version mismatch: bridge is running but too old — guide the AI to update.
+		if (result.bridge.versionMismatch) {
+			const vm = result.bridge.versionMismatch;
+			lines.push(`⚠ PiBridge is outdated (running v${vm.running}, requires v${vm.required}+).`);
+			lines.push("");
+			lines.push("The installed PiBridge.cs is older than this extension expects. Update it:");
+			lines.push("  Call unity_install_bridge with this project's path to reinstall the latest PiBridge.cs.");
+			lines.push("  Unity will recompile and restart the bridge automatically (~10-20s).");
+			return lines.join("\n");
+		}
+
 		lines.push("⚠ PiBridge is not running.");
 		lines.push("");
-		lines.push("To enable unity_command, add PiBridge.cs to your project:");
-		lines.push("  1. Copy extensions/unity/PiBridge.cs to <project>/Assets/Editor/");
-		lines.push("  2. (Re)open the project in Unity — the bridge auto-starts on load");
-		lines.push("  3. Check the Unity Console for: [PiBridge] Listening on http://127.0.0.1:PORT");
+		lines.push("To enable unity_command, install PiBridge in this project:");
+		lines.push("  Call unity_install_bridge with this project's path.");
+		lines.push("  Unity will recompile and the bridge auto-starts (~10-20s). Check the Console for:");
+		lines.push("  [PiBridge] Listening on http://127.0.0.1:PORT");
 		if (result.bridge.reason) {
 			lines.push("");
 			lines.push(`Reason: ${result.bridge.reason}`);

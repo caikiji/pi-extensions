@@ -23,6 +23,30 @@ export const DEFAULT_PORT = 17841;
 export const MAX_PORT_PROBE = 20;
 export const PORT_FILE = "pi-bridge-port";
 
+/**
+ * Minimum PiBridge.cs version this client requires. Bump when the C# bridge
+ * gains a required command or field. If a running bridge reports a lower
+ * version, discoverBridge returns available=false with versionMismatch set,
+ * so the caller can tell the user to reinstall via unity_install_bridge.
+ */
+export const MIN_BRIDGE_VERSION = "0.2.0";
+
+/**
+ * Compare semver-like version strings ("0.2.0" < "0.10.0"). Returns true if
+ * `actual` is greater than or equal to `minimum`.
+ */
+export function isBridgeVersionAtLeast(actual: string, minimum: string): boolean {
+	const parse = (v: string) => v.split(".").map((n) => Number.parseInt(n, 10) || 0);
+	const a = parse(actual);
+	const m = parse(minimum);
+	for (let i = 0; i < Math.max(a.length, m.length); i++) {
+		const ai = a[i] ?? 0;
+		const mi = m[i] ?? 0;
+		if (ai !== mi) return ai > mi;
+	}
+	return true;
+}
+
 export interface BridgeResponse<T = unknown> {
 	ok: boolean;
 	result?: T;
@@ -38,6 +62,7 @@ export interface BridgeInfo {
 	unityVersion?: string;
 	projectPath?: string;
 	reason?: string; // why unavailable
+	versionMismatch?: { running: string; required: string }; // present when bridge is too old
 }
 
 /**
@@ -81,11 +106,24 @@ async function pingBridge(port: number): Promise<BridgeInfo> {
 	try {
 		const res = await sendRaw<{ version: string; unityVersion: string; projectPath: string }>(port, "ping", {});
 		if (res.ok && res.result) {
+			const runningVersion = res.result.version ?? "0.0.0";
+			// Reject bridges older than the client requires. The user should reinstall
+			// PiBridge.cs (via unity_install_bridge) to pick up new commands/fields.
+			if (!isBridgeVersionAtLeast(runningVersion, MIN_BRIDGE_VERSION)) {
+				return {
+					available: false,
+					port,
+					version: runningVersion,
+					versionMismatch: { running: runningVersion, required: MIN_BRIDGE_VERSION },
+					reason: `PiBridge.cs v${runningVersion} is too old (requires v${MIN_BRIDGE_VERSION}+). ` +
+						"Run unity_install_bridge to update PiBridge.cs in this project, then retry.",
+				};
+			}
 			return {
 				available: true,
 				port,
 				url: `http://127.0.0.1:${port}`,
-				version: res.result.version,
+				version: runningVersion,
 				unityVersion: res.result.unityVersion,
 				projectPath: res.result.projectPath,
 			};

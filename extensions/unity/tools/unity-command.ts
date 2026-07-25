@@ -11,7 +11,8 @@
  * Temp/pi-bridge-port.
  *
  * Commands (see PiBridge.cs for full list):
- *   ping        — health check, returns bridge/Unity/project info
+ *   ping        — health check, returns bridge/Unity/project info (incl. autoFocus state)
+ *   config      — query or change bridge settings (args: { autoFocus?: boolean })
  *   refresh     — AssetDatabase.Refresh()
  *   compile     — trigger recompilation
  *   status      — isCompiling / isPlaying / isUpdating etc.
@@ -23,6 +24,10 @@
  *   log         — read recent Console entries (args: { count, severity })
  *                 severity filter: "error" (includes assert/exception), "warning", "log", or "" for all
  *   eval        — call a static method (args: { code }) — requires PI_BRIDGE_ALLOW_EVAL=1
+ *
+ * Background focus: when Unity is unfocused, EditorApplication.delayCall is throttled to ~1Hz, so the
+ * bridge brings Unity to the foreground before dispatching (Windows only, bypasses the throttle).
+ * Disable via `config { autoFocus: false }` if you don't want the window stealing focus.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -32,6 +37,7 @@ import { resolveProjectPath } from "../lib/tool-utils.ts";
 
 export const BRIDGE_COMMANDS = [
 	"ping",
+	"config",
 	"refresh",
 	"compile",
 	"status",
