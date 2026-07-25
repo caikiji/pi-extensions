@@ -227,6 +227,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use unity_install_bridge to set up PiBridge for a project before using unity_command. It only writes one file (Assets/Editor/PiBridge.cs) and backs up any existing version.",
 			"If unity_command reports a version mismatch (PiBridge outdated), call unity_install_bridge again to update PiBridge.cs — the extension and the C# bridge are versioned together.",
+			"If any unity_command call fails unexpectedly (timeout, connection error, unknown command, malformed response), try unity_install_bridge to reinstall PiBridge.cs — a stale or corrupted bridge is the most common cause, and reinstalling fixes it without touching the rest of the project.",
 			"After unity_install_bridge, tell the user to focus the Unity window (or reopen the project) so it recompiles and starts the bridge. Then verify with unity_command ping.",
 		],
 		parameters: unityInstallBridgeParams,
