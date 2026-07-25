@@ -87,21 +87,24 @@ Unity 开发者用 pi 时,agent 应该能:
 
 ```
 extensions/unity/
-├── index.ts                    # 入口,注册 tool/command
+├── index.ts                    # 入口,注册 6 个 tool
 ├── package.json                # pi 扩展声明
+├── PiBridge.cs                 # C# HTTP bridge(装到项目 Assets/Editor/ 用)
 ├── lib/
-│   ├── paths.ts                # Unity.exe 发现、日志路径定位、项目根探测
-│   ├── editor-log.ts           # 定位 + 解析 Editor.log(项目级/全局回退)
-│   ├── log-parser.ts           # 提取编译错误/异常/导入错误/包管理错误
-│   ├── batchmode.ts            # batchmode 封装:路径处理、文件锁、超时、取消+清理、stdout 实时读
-│   └── project-version.ts      # 读 ProjectVersion.txt,版本感知
-├── tools/
-│   ├── unity-log.ts            # tool: 读取/解析 Unity 日志
-│   ├── unity-run.ts            # tool: 执行 batchmode 脚本(核心)
-│   ├── unity-status.ts         # tool: 检测 Unity 运行/编译/导入状态
-│   └── unity-project.ts        # tool: 读项目元信息(版本、asmdef、manifest)
-└── commands/
-    └── unity-doctor.ts         # /unity-doctor: 跑全套诊断
+│   ├── paths.ts                # Unity.exe 发现(env→Hub→注册表)、日志路径定位、lockfile 检测
+│   ├── project-version.ts      # 读 ProjectVersion.txt,版本比较
+│   ├── editor-log.ts           # 日志读取(项目级/全局回退,Windows 独占锁处理)
+│   ├── log-parser.ts           # 解析 CSxxxx 编译错误/异常/导入错误为结构化条目
+│   ├── batchmode.ts            # batchmode 封装(三重判定+文件锁+超时+取消清理+实时进度)
+│   ├── bridge-client.ts        # PiBridge HTTP 客户端(端口发现+版本校验+超时)
+│   └── tool-utils.ts           # 共享 helper(项目根探测)
+└── tools/
+    ├── unity-log.ts            # tool: 读/解析 Unity 日志
+    ├── unity-status.ts         # tool: 检测 Unity 运行/编译/导入状态
+    ├── unity-project.ts        # tool: 读项目元信息(版本/asmdef/包)
+    ├── unity-run.ts            # tool: 执行 batchmode 脚本(独立模式)
+    ├── unity-command.ts        # tool: 通过 PiBridge 操控运行中的 Editor
+    └── unity-install-bridge.ts # tool: 自动安装 PiBridge.cs 到项目
 ```
 
 ---
@@ -111,21 +114,24 @@ extensions/unity/
 ### 0. `unity_command` — 操控运行中的 Unity(通过 PiBridge)
 让 AI 在**已打开的** Unity Editor 里执行命令,不用启动第二个实例。
 
-**前提**:项目 `Assets/Editor/` 下有 `PiBridge.cs`(见下文「PiBridge 安装」)。
+**前提**:项目 `Assets/Editor/` 下有 `PiBridge.cs`(见下文「PiBridge 安装」)。扩展会校验 bridge 版本,过旧时报错并提示用 `unity_install_bridge` 更新。
 
 **参数**:
-- `command`: `ping` | `refresh` | `compile` | `status` | `run-menu` | `asset-info` | `log` | `eval`
+- `command`: `ping` | `config` | `refresh` | `compile` | `status` | `run-menu` | `asset-info` | `log` | `eval`
 - `projectPath?`:项目根,默认 cwd 自动探测
-- `args?`:命令参数对象(`run-menu` 需 `{ menuPath }`,`asset-info` 需 `{ path }` 等)
-- `timeout?`:秒,默认 60
+- `args?`:命令参数对象(`run-menu` 需 `{ menuPath }`,`asset-info` 需 `{ path }`,`config` 需 `{ autoFocus }` 等)
+- `timeout?`:秒,默认 60(`run-menu` 默认 15)
 
 **流程**:
 1. `bridge-client.ts` 读 `Temp/pi-bridge-port` 发现端口(回退探测 17841+)
-2. HTTP POST `http://127.0.0.1:{port}/{command}`,body 是 args 的 JSON
-3. PiBridge 后台线程收到 → `EditorApplication.delayCall` 派发主线程 → 执行 → 返回 JSON
-4. 返回 `{ ok, result?, error?, durationMs }`
+2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`,过旧则返回 `versionMismatch` 错误
+3. HTTP POST `http://127.0.0.1:{port}/{command}`,body 是 args 的 JSON
+4. PiBridge 后台线程收到 → `EditorApplication.delayCall` 派发主线程(失焦时先自动聚焦,见下)→ 执行 → 返回 JSON
+5. 返回 `{ ok, result?, error?, durationMs }`
 
-**节流注意**:Editor 失焦时 `delayCall` 有秒级延迟(命令不丢,但执行慢)。触发 `compile`/`refresh` 后应轮询 `status` 直到 `isCompiling: false`。
+**失焦自动聚焦**(v0.2.0+):Editor 失焦时 `delayCall` 被节流到 ~1Hz,bridge 会在派发前用 Win32 `SetForegroundWindow` 把 Unity 置前(仅 Windows),让主循环全速。可用 `config { autoFocus: false }` 关闭。
+
+**节流注意**:即使自动聚焦,触发 `compile`/`refresh` 后仍应轮询 `status` 直到 `isCompiling: false`。
 
 **安全**:
 - 只监听 `127.0.0.1`(不暴露局域网)
@@ -217,11 +223,23 @@ extensions/unity/
 
 `PiBridge.cs` 是一个 C# 文件,放在 Unity 项目的 `Assets/Editor/` 下,自动随项目加载启动一个 HTTP bridge,让外部进程(AI)能操控运行中的 Editor。
 
-### 步骤
+### 方式 A:用 `unity_install_bridge` 工具自动安装(推荐)
+
+让 AI 调用 `unity_install_bridge` tool,传项目路径即可:
+```
+unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
+```
+工具会自动:把 `PiBridge.cs` 复制到 `<projectPath>/Assets/Editor/`(已存在则备份为 `.bak`)、确保目录存在、返回安装路径和后续步骤。若其他 unity 命令出错(版本不匹配/超时/连接错误),AI 会自动重装作为首选排查。
+
+### 方式 B:手动安装
 1. 把 `extensions/unity/PiBridge.cs` 复制到你的 Unity 项目 `Assets/Editor/`(没有 `Editor` 文件夹就新建一个)
 2. 在 Unity 里打开该项目(或如果已打开,等它自动编译)
 3. 查看 Unity Console,应出现:`[PiBridge] Listening on http://127.0.0.1:17841`
 4. 现在 AI 可以用 `unity_command` 了
+
+### 版本校验
+
+扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.2.0`),`ping` 时校验运行中的 bridge 版本。过旧则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 更新。升级扩展后,旧项目里的 PiBridge.cs 会被检测出来并引导更新。
 
 ### 工作原理
 - `[InitializeOnLoad]` 静态构造函数在项目加载时启动 `HttpListener`(后台线程)
@@ -229,14 +247,22 @@ extensions/unity/
 - 外部 POST 请求 → 后台线程接收(即时,不受节流影响)→ `EditorApplication.delayCall` 派发主线程执行(Unity API 主线程限定)→ 返回 JSON
 - 域重载(重新编译)时自动重启 bridge
 
+### 失焦节流与自动聚焦
+
+Unity Editor 失焦时,`EditorApplication.delayCall`/`update` 被节流到 ~1Hz(这是 Unity 设计,`Application.runInBackground` 对 Editor 无效,无官方开关)。v0.2.0+ 的 PiBridge 会在派发命令前用 Win32 `SetForegroundWindow` + `AttachThreadInput` 把 Unity 窗口置前,让主循环全速运行(延迟从数秒降到 ~10-50ms)。
+
+- 仅 Windows(`UNITY_EDITOR_WIN`),macOS/Linux no-op(节流本就较轻)
+- 默认开启,可用 `config { autoFocus: false }` 关闭
+- 建议同时在 Unity `Preferences → General → Interaction Mode` 设为 `No Throttling`,进一步降低前台延迟
+
 ### 安全边界
 - **只监听 127.0.0.1**,不暴露到局域网
-- 命令白名单(`ping`/`refresh`/`compile`/`status`/`run-menu`/`asset-info`/`log`/`eval`),不接受任意 C#
+- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`run-menu`/`asset-info`/`log`/`eval`),不接受任意 C#
 - `eval` 命令默认关闭,需在 Unity 启动前设环境变量 `PI_BRIDGE_ALLOW_EVAL=1`
 
 ### 已知限制
-- Editor 失焦/最小化时,主线程 `delayCall` 被节流到约 1Hz,命令执行有秒级延迟(但命令不丢)
-- 这是 Unity 的设计(`EditorApplication.update` 失焦节流),无法绕过
+- `run-menu` 调 `EditorApplication.ExecuteMenuItem` 是同步阻塞的,若触发模态对话框会冻结主线程导致 bridge 无响应(15s 超时 + 拒绝在已有对话框时执行)
+- 首次安装 PiBridge 后需 Unity 获得焦点触发编译(旧 bridge 无自动聚焦能力,第一次需手动给焦点)
 
 ---
 
@@ -277,9 +303,11 @@ public static void BuildMethod() {
 
 ---
 
-## 实现优先级
+## 实现状态
 
-1. **已完成 MVP**: `unity_log` + `unity_status` + `unity_project`(纯读取,零风险)
-2. **已完成核心**: `unity_run`(batchmode 封装,带文件锁/超时/清理/三重判定)
-3. **已完成 bridge**: `unity_command` + PiBridge.cs(操控运行中的 Editor)
-4. **后续增强**: C# 结果回传 helper 包、`/unity-doctor` 命令、Project Auditor 集成
+1. ✅ **MVP(纯读取)**:`unity_log` + `unity_status` + `unity_project`
+2. ✅ **batchmode**:`unity_run`(文件锁/超时/取消清理/三重判定)
+3. ✅ **HTTP bridge**:`unity_command` + PiBridge.cs(操控运行中的 Editor)
+4. ✅ **自动安装**:`unity_install_bridge`(AI 给项目路径即可装 bridge)
+5. ✅ **失焦优化**:PiBridge v0.2.0 自动聚焦 + `config` 命令 + 版本校验
+6. ⏳ **后续**:C# 结果回传 helper 包、`/unity-doctor` 命令、Project Auditor 集成
