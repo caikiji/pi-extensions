@@ -218,16 +218,16 @@ export default function (pi: ExtensionAPI) {
 		name: "unity_install_bridge",
 		label: "Install PiBridge",
 		description:
-			"Install PiBridge.cs into a Unity project so unity_command can drive its running Editor. " +
-			"Copies the bundled PiBridge.cs to <projectPath>/Assets/Editor/PiBridge.cs. " +
-			"Creates Assets/Editor/ if missing. If the file already exists, backs it up to PiBridge.cs.bak (unless overwrite=true). " +
+			"Install PiBridge into a Unity project so unity_command can drive its running Editor. " +
+			"Copies the bundled PiBridge/*.cs files to <projectPath>/Assets/Editor/. " +
+			"Creates Assets/Editor/ if missing and overwrites any existing bridge files. " +
 			"After install, Unity auto-compiles on focus and the bridge starts — then unity_command becomes usable. " +
 			"Use this BEFORE unity_command when the bridge is not yet installed in a project.",
-		promptSnippet: "Install PiBridge.cs into a Unity project (enables unity_command)",
+		promptSnippet: "Install PiBridge into a Unity project (enables unity_command)",
 		promptGuidelines: [
-			"Use unity_install_bridge to set up PiBridge for a project before using unity_command. It only writes one file (Assets/Editor/PiBridge.cs) and backs up any existing version.",
-			"If unity_command reports a version mismatch (PiBridge outdated), call unity_install_bridge again to update PiBridge.cs — the extension and the C# bridge are versioned together.",
-			"If any unity_command call fails unexpectedly (timeout, connection error, unknown command, malformed response), try unity_install_bridge to reinstall PiBridge.cs — a stale or corrupted bridge is the most common cause, and reinstalling fixes it without touching the rest of the project.",
+			"Use unity_install_bridge to set up PiBridge for a project before using unity_command. It writes the PiBridge/*.cs files to Assets/Editor/, overwriting any existing versions.",
+			"If unity_command reports a version mismatch (PiBridge outdated), call unity_install_bridge again to update PiBridge — the extension and the C# bridge are versioned together.",
+			"If any unity_command call fails unexpectedly (timeout, connection error, unknown command, malformed response), try unity_install_bridge to reinstall PiBridge — a stale or corrupted bridge is the most common cause, and reinstalling fixes it without touching the rest of the project.",
 			"After unity_install_bridge, tell the user to focus the Unity window (or reopen the project) so it recompiles and starts the bridge. Then verify with unity_command ping.",
 		],
 		parameters: unityInstallBridgeParams,
@@ -243,9 +243,8 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const details = result.details as UnityInstallBridgeResult | undefined;
 			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
-			const tag = details.alreadyExisted ? "updated" : "installed";
 			return new Text(
-				theme.fg("success", `✓ ${tag} `) + theme.fg("accent", `v${details.version}`) +
+				theme.fg("success", `✓ installed `) + theme.fg("accent", `v${details.version}`) +
 					theme.fg("dim", ` → ${details.installedPath.replace(/\\/g, "/")}`),
 				0,
 				0,
@@ -254,14 +253,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ─── /unity-install-bridge ──────────────────────────────────────────────
-	// User-facing shortcut: install PiBridge.cs into cwd's Unity project without
-	// routing through the agent. Usage: /unity-install-bridge [overwrite]
+	// User-facing shortcut: install PiBridge into cwd's Unity project without
+	// routing through the agent.
 	pi.registerCommand("unity-install-bridge", {
-		description: "Install PiBridge.cs into the current Unity project (cwd). Optional arg: 'overwrite' to skip backup.",
-		handler: async (args, ctx) => {
-			const overwrite = args.trim().toLowerCase() === "overwrite";
+		description: "Install PiBridge into the current Unity project (cwd). Overwrites any existing bridge files.",
+		handler: async (_args, ctx) => {
 			try {
-				const result = await runUnityInstallBridge({ projectPath: ctx.cwd, overwrite });
+				const result = await runUnityInstallBridge({ projectPath: ctx.cwd });
 				ctx.ui.notify(formatInstallBridgeResult(result), "info");
 			} catch (err) {
 				ctx.ui.notify(`✗ ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -450,19 +448,11 @@ function formatUnityCommandResult(result: UnityCommandResult): string {
 
 function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 	const lines: string[] = [];
-	const action = result.alreadyExisted ? "Updated" : "Installed";
-	lines.push(`${action} PiBridge v${result.version}`);
+	lines.push(`Installed PiBridge v${result.version}`);
 	lines.push("");
 	lines.push(`Path: ${result.installedPath} (${result.installedFiles.length} file${result.installedFiles.length === 1 ? "" : "s"})`);
 	for (const f of result.installedFiles) {
 		lines.push(`  • ${f.replace(/\\/g, "/")}`);
-	}
-	if (result.backupPaths.length > 0) {
-		lines.push("");
-		lines.push("Backed up existing files:");
-		for (const b of result.backupPaths) {
-			lines.push(`  • ${b.replace(/\\/g, "/")}`);
-		}
 	}
 	lines.push("");
 	lines.push("Next steps:");
