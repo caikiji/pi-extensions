@@ -324,22 +324,23 @@ namespace PiBridge
 
                 case "refresh":
                     AssetDatabase.Refresh();
-                    return new Response { ok = true, result = new { refreshed = true, refreshTriggered = true } };
+                    return new Response { ok = true, result = new { refreshed = true } };
 
                 case "compile":
                     // Request recompile. AssetDatabase.Refresh also triggers import.
                     AssetDatabase.Refresh();
-                    bool wasCompiling = EditorApplication.isCompiling;
-                    bool stillCompiling = EditorApplication.isCompiling;
+                    // Refresh is async, so isCompiling is read once; wasCompiling and
+                    // isCompiling in the result reflect the same snapshot.
+                    bool isCompiling = EditorApplication.isCompiling;
                     return new Response
                     {
                         ok = true,
                         result = new
                         {
-                            wasCompiling = wasCompiling,
-                            isCompiling = stillCompiling,
+                            wasCompiling = isCompiling,
+                            isCompiling = isCompiling,
                             refreshTriggered = true,
-                            note = stillCompiling
+                            note = isCompiling
                                 ? "Compile/import in progress. Poll /status until isCompiling is false."
                                 : "No compile was triggered (nothing changed). Refresh ran.",
                         }

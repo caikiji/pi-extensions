@@ -210,7 +210,7 @@ async function sendRaw<T>(
 		const elapsed = wallMs();
 		if (e.name === "AbortError") {
 			// Distinguish user-cancelled (external signal) from timeout.
-			const cancelled = externalSignal?.aborted === true;
+			const cancelled = Boolean(externalSignal?.aborted);
 			return {
 				ok: false,
 				error: cancelled
