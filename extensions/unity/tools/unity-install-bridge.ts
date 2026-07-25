@@ -10,8 +10,8 @@
  * which unity_command becomes usable.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
 export const unityInstallBridgeParams = Type.Object({
@@ -19,24 +19,16 @@ export const unityInstallBridgeParams = Type.Object({
 		description:
 			"Path to the Unity project root (the folder containing Assets/ and ProjectSettings/). The bridge files will be installed to <projectPath>/Assets/Editor/.",
 	}),
-	overwrite: Type.Optional(
-		Type.Boolean({
-			description: "If any bridge .cs file already exists, overwrite it. Default false (backs up existing files to .bak first).",
-		}),
-	),
 });
 
 export interface UnityInstallBridgeParams {
 	projectPath: string;
-	overwrite?: boolean;
 }
 
 export interface UnityInstallBridgeResult {
 	projectPath: string;
 	installedPath: string;
 	installedFiles: string[];
-	alreadyExisted: boolean;
-	backupPaths: string[];
 	version: string;
 	nextSteps: string[];
 }
@@ -86,21 +78,10 @@ export async function runUnityInstallBridge(
 	const editorDir = join(projectPath, "Assets", "Editor");
 	mkdirSync(editorDir, { recursive: true });
 
-	// 4. Copy each .cs file, backing up existing ones unless overwrite=true
+	// 4. Copy each .cs file, overwriting any existing same-named file
 	const installedFiles: string[] = [];
-	const backupPaths: string[] = [];
-	let alreadyExisted = false;
-
 	for (const file of sourceFiles) {
 		const targetPath = join(editorDir, file);
-		if (existsSync(targetPath)) {
-			alreadyExisted = true;
-			if (!params.overwrite) {
-				const backupPath = targetPath + ".bak";
-				renameSync(targetPath, backupPath);
-				backupPaths.push(backupPath);
-			}
-		}
 		const content = readFileSync(join(bridgeSourceDir, file), "utf-8");
 		writeFileSync(targetPath, content, "utf-8");
 		installedFiles.push(targetPath);
@@ -111,8 +92,6 @@ export async function runUnityInstallBridge(
 		projectPath,
 		installedPath: editorDir,
 		installedFiles,
-		alreadyExisted,
-		backupPaths,
 		version,
 		nextSteps: [
 			"Unity will auto-detect the new .cs files and recompile (may take a few seconds).",
