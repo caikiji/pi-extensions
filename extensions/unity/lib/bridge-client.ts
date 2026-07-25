@@ -29,7 +29,7 @@ export const PORT_FILE = "pi-bridge-port";
  * version, discoverBridge returns available=false with versionMismatch set,
  * so the caller can tell the user to reinstall via unity_install_bridge.
  */
-export const MIN_BRIDGE_VERSION = "0.2.2";
+export const MIN_BRIDGE_VERSION = "0.2.3";
 
 /**
  * Compare semver-like version strings ("0.2.0" < "0.10.0"). Returns true if
@@ -147,8 +147,9 @@ export async function sendCommand<T = unknown>(
 	command: string,
 	args: Record<string, unknown> = {},
 	timeoutMs = 60000,
+	signal?: AbortSignal,
 ): Promise<BridgeResponse<T>> {
-	return sendRaw<T>(port, command, args, timeoutMs);
+	return sendRaw<T>(port, command, args, timeoutMs, signal);
 }
 
 /**
@@ -159,12 +160,23 @@ async function sendRaw<T>(
 	command: string,
 	args: Record<string, unknown>,
 	timeoutMs = 60000,
+	externalSignal?: AbortSignal,
 ): Promise<BridgeResponse<T>> {
 	const url = `http://127.0.0.1:${port}/${command}`;
 	const body = JSON.stringify(args ?? {});
+	const wallStart = Date.now();
 
+	// Aggregate the timeout and the caller's abort signal (from pi's tool
+	// cancellation, e.g. user pressing ESC) into one controller. Whichever
+	// fires first aborts the fetch.
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const onExternalAbort = () => controller.abort();
+	if (externalSignal) {
+		if (externalSignal.aborted) controller.abort();
+		else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+	}
+	const wallMs = () => Date.now() - wallStart;
 
 	try {
 		const response = await fetch(url, {
@@ -178,29 +190,40 @@ async function sendRaw<T>(
 			return {
 				ok: false,
 				error: `HTTP ${response.status} ${response.statusText}`,
-				durationMs: 0,
+				durationMs: wallMs(),
 			};
 		}
 
 		const text = await response.text();
 		try {
-			return JSON.parse(text) as BridgeResponse<T>;
+			const parsed = JSON.parse(text) as BridgeResponse<T>;
+			// Override the bridge's internal duration with the true wall-clock time
+			// the caller waited (request sent → response received). The bridge's own
+			// durationMs only covers a sub-span and understates real latency.
+			parsed.durationMs = wallMs();
+			return parsed;
 		} catch {
-			return { ok: false, error: `Invalid JSON response: ${text.slice(0, 200)}`, durationMs: 0 };
+			return { ok: false, error: `Invalid JSON response: ${text.slice(0, 200)}`, durationMs: wallMs() };
 		}
 	} catch (err) {
 		const e = err as Error;
+		const elapsed = wallMs();
 		if (e.name === "AbortError") {
+			// Distinguish user-cancelled (external signal) from timeout.
+			const cancelled = externalSignal?.aborted === true;
 			return {
 				ok: false,
-				error: `Timed out after ${timeoutMs / 1000}s. The Editor may be unfocused (main-thread dispatch is throttled) or busy.`,
-				durationMs: timeoutMs,
+				error: cancelled
+					? `Cancelled after ${(elapsed / 1000).toFixed(1)}s.`
+					: `Timed out after ${(timeoutMs / 1000).toFixed(0)}s. The Editor may be unfocused/throttled, or a command is blocking the main thread.`,
+				durationMs: elapsed,
 			};
 		}
 		// Connection refused etc. means bridge isn't running on this port
-		return { ok: false, error: `Cannot connect to bridge: ${e.message}`, durationMs: 0 };
+		return { ok: false, error: `Cannot connect to bridge: ${e.message}`, durationMs: elapsed };
 	} finally {
 		clearTimeout(timer);
+		if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
 	}
 }
 

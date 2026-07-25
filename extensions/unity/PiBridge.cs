@@ -47,7 +47,7 @@ namespace PiBridge
         private const int DefaultPort = 17841;
         private const int MaxPortAttempts = 20;
         private const string PortFileName = "pi-bridge-port";
-        private const string BridgeVersion = "0.2.2";
+        private const string BridgeVersion = "0.2.3";
 
         // When true (default), the bridge brings Unity to the foreground before
         // dispatching a command, to bypass the ~1Hz delayCall throttle that
@@ -324,20 +324,24 @@ namespace PiBridge
 
                 case "refresh":
                     AssetDatabase.Refresh();
-                    return new Response { ok = true, result = new { refreshed = true } };
+                    return new Response { ok = true, result = new { refreshed = true, refreshTriggered = true } };
 
                 case "compile":
-                    // Request recompile and wait for it to finish.
+                    // Request recompile. AssetDatabase.Refresh also triggers import.
                     AssetDatabase.Refresh();
-                    bool compiling = EditorApplication.isCompiling;
+                    bool wasCompiling = EditorApplication.isCompiling;
+                    bool stillCompiling = EditorApplication.isCompiling;
                     return new Response
                     {
                         ok = true,
                         result = new
                         {
-                            wasCompiling = compiling,
-                            isCompiling = EditorApplication.isCompiling,
-                            note = "Compile triggered. Use /status to poll completion."
+                            wasCompiling = wasCompiling,
+                            isCompiling = stillCompiling,
+                            refreshTriggered = true,
+                            note = stillCompiling
+                                ? "Compile/import in progress. Poll /status until isCompiling is false."
+                                : "No compile was triggered (nothing changed). Refresh ran.",
                         }
                     };
 

@@ -190,8 +190,8 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: unityCommandParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = await runUnityCommand(params, ctx.cwd);
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const result = await runUnityCommand(params, ctx.cwd, signal);
 			return {
 				content: [{ type: "text", text: formatUnityCommandResult(result) }],
 				details: result,
