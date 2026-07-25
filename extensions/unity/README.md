@@ -89,7 +89,12 @@ Unity 开发者用 pi 时,agent 应该能:
 extensions/unity/
 ├── index.ts                    # 入口,注册 6 个 tool
 ├── package.json                # pi 扩展声明
-├── PiBridge.cs                 # C# HTTP bridge(装到项目 Assets/Editor/ 用)
+├── PiBridge/                   # C# HTTP bridge(装到项目 Assets/Editor/ 用)
+│   ├── PiBridge.cs             # 主类:HttpListener + 命令派发 + ExecuteCommand
+│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验)
+│   ├── WindowFocus.cs          # Win32 聚焦逻辑(绕过失焦节流)
+│   ├── Response.cs             # 响应结构
+│   └── SimpleJson.cs           # 极简 JSON 序列化/解析
 ├── lib/
 │   ├── paths.ts                # Unity.exe 发现(env→Hub→注册表)、日志路径定位、lockfile 检测
 │   ├── project-version.ts      # 读 ProjectVersion.txt,版本比较
@@ -232,7 +237,7 @@ unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
 工具会自动:把 `PiBridge.cs` 复制到 `<projectPath>/Assets/Editor/`(已存在则备份为 `.bak`)、确保目录存在、返回安装路径和后续步骤。若其他 unity 命令出错(版本不匹配/超时/连接错误),AI 会自动重装作为首选排查。
 
 ### 方式 B:手动安装
-1. 把 `extensions/unity/PiBridge.cs` 复制到你的 Unity 项目 `Assets/Editor/`(没有 `Editor` 文件夹就新建一个)
+1. 把 `extensions/unity/PiBridge/` 目录下的所有 `.cs` 文件复制到你的 Unity 项目 `Assets/Editor/`(没有 `Editor` 文件夹就新建一个)
 2. 在 Unity 里打开该项目(或如果已打开,等它自动编译)
 3. 查看 Unity Console,应出现:`[PiBridge] Listening on http://127.0.0.1:17841`
 4. 现在 AI 可以用 `unity_command` 了

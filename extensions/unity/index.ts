@@ -453,9 +453,16 @@ function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 	const action = result.alreadyExisted ? "Updated" : "Installed";
 	lines.push(`${action} PiBridge v${result.version}`);
 	lines.push("");
-	lines.push(`Path: ${result.installedPath}`);
-	if (result.backupPath) {
-		lines.push(`Backed up existing file to: ${result.backupPath}`);
+	lines.push(`Path: ${result.installedPath} (${result.installedFiles.length} file${result.installedFiles.length === 1 ? "" : "s"})`);
+	for (const f of result.installedFiles) {
+		lines.push(`  • ${f.replace(/\\/g, "/")}`);
+	}
+	if (result.backupPaths.length > 0) {
+		lines.push("");
+		lines.push("Backed up existing files:");
+		for (const b of result.backupPaths) {
+			lines.push(`  • ${b.replace(/\\/g, "/")}`);
+		}
 	}
 	lines.push("");
 	lines.push("Next steps:");
