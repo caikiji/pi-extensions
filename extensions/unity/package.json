@@ -1,0 +1,10 @@
+{
+  "name": "pi-unity",
+  "version": "0.1.0",
+  "description": "Unity Editor integration for pi: read logs, run batchmode scripts, inspect projects",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

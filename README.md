@@ -11,6 +11,7 @@ Personal [pi](https://github.com/earendil-works/pi-mono) extensions, packaged fo
 | `subagent` | Delegate tasks to specialized subagents with isolated context windows |
 | `plan-mode` | Read-only exploration mode: disables write tools, bash allowlist, extracts numbered plans, tracks `[DONE:n]` progress |
 | `handoff` | Transfer context to a new focused session via an LLM-generated prompt (avoids lossy compaction) |
+| `unity` | Unity Editor integration: read logs, inspect projects, run batchmode scripts, and drive a running Editor via an HTTP bridge (PiBridge.cs). Supports Unity 2019.4 LTS+ |
 
 ## Install
 
