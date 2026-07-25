@@ -252,6 +252,23 @@ export default function (pi: ExtensionAPI) {
 			);
 		},
 	});
+
+	// ─── /unity-install-bridge ──────────────────────────────────────────────
+	// Convenience slash command: install PiBridge.cs into the current working
+	// directory's Unity project, no need to invoke the tool via the agent.
+	// Usage: /unity-install-bridge [overwrite]
+	pi.registerCommand("unity-install-bridge", {
+		description: "Install PiBridge.cs into the current Unity project (cwd). Optional arg: 'overwrite' to skip backup.",
+		handler: async (args, ctx) => {
+			const overwrite = args.trim().toLowerCase() === "overwrite";
+			try {
+				const result = await runUnityInstallBridge({ projectPath: ctx.cwd, overwrite });
+				ctx.ui.notify(formatInstallBridgeResult(result), "info");
+			} catch (err) {
+				ctx.ui.notify(`✗ ${err instanceof Error ? err.message : String(err)}`, "error");
+			}
+		},
+	});
 }
 
 // ─── Formatters ────────────────────────────────────────────────────────────
