@@ -83,6 +83,7 @@ export interface UnityCommandResult {
 export async function runUnityCommand(
 	params: UnityCommandParams,
 	cwd: string,
+	signal?: AbortSignal,
 ): Promise<UnityCommandResult> {
 	const projectPath = resolveProjectPath(params.projectPath, cwd);
 
@@ -113,10 +114,10 @@ export async function runUnityCommand(
 	} else {
 		timeoutMs = (params.timeout ?? 60) * 1000;
 	}
-	const response = await sendCommand(bridge.port!, params.command, params.args ?? {}, timeoutMs);
+	const response = await sendCommand(bridge.port!, params.command, params.args ?? {}, timeoutMs, signal);
 
-	// 3. If run-menu timed out, annotate the error so the AI knows the bridge
-	// may now be unresponsive (main thread frozen by a modal dialog).
+	// 3. If run-menu timed out (not user-cancelled), annotate the error so the
+	// AI knows the bridge may now be unresponsive (main thread frozen by a modal).
 	if (!response.ok && params.command === "run-menu" && response.error && response.error.includes("Timed out")) {
 		response.error =
 			response.error +
