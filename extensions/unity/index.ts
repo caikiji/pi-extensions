@@ -254,9 +254,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ─── /unity-install-bridge ──────────────────────────────────────────────
-	// Convenience slash command: install PiBridge.cs into the current working
-	// directory's Unity project, no need to invoke the tool via the agent.
-	// Usage: /unity-install-bridge [overwrite]
+	// User-facing shortcut: install PiBridge.cs into cwd's Unity project without
+	// routing through the agent. Usage: /unity-install-bridge [overwrite]
 	pi.registerCommand("unity-install-bridge", {
 		description: "Install PiBridge.cs into the current Unity project (cwd). Optional arg: 'overwrite' to skip backup.",
 		handler: async (args, ctx) => {
