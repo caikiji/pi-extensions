@@ -308,65 +308,74 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 做 MCP 包装只需要适配协议层，C# 侧一行不改。
 
 
-# PiBridge 的独特优势：双向事件驱动
+# PiBridge 的独特优势：双向事件驱动（非阻塞订阅）
 
 目前所有 Unity MCP 项目（包括官方 CLI）都是**请求-响应模式**：
 Agent 问一句，Unity 答一句，Agent 再问下一句。
 
-PiBridge + pi extension 的组合可以做 **双向事件驱动**——
-Agent 不需要轮询，PiBridge 通过 SSE 把事件主动推过来。
+PiBridge + pi extension 的组合可以做 **非阻塞事件订阅**——
+Agent 订好事件后继续干活，事件来了 pi 主动发消息打断它。
 
-## 架构（非常简单）
+## 架构
 
 ```
                        请求（HTTP POST）
 Agent / pi extension ──────────────────→ PiBridge (Unity Editor)
       │                                       │
-      │  ← /events SSE 长连接                 │
-      │  ← 先吐出历史积压事件                  │
-      │  ← 然后转实时推送                     │
-      │  ← compile_done, playmode_exit,       │
-      │     error_occurred, import_finished    │
+      │  ← /events SSE 长连接（后台）          │
+      │  ← compile_done → pi.sendUserMessage() │
+      │  ← playmode_exit → 打断 Agent         │
+      │  ← error_occurred → 自动诊断          │
 ```
 
 **只有 PiBridge 是服务端，pi 是客户端。** 没有额外端口，没有双向 HTTP。
 
-## 事件队列 + SSE（事件永不丢失）
+## 事件队列 + SSE
 
-PiBridge 内部维护一个 FIFO 事件队列。SSE 连接建立时，先把队列里积压的事件一次性吐出，然后转入实时模式：
+PiBridge 维护一个事件队列。SSE 连接建立时先吐出历史积压，然后转实时推送：
 
 ```
 时间线：
 
 compile_done 发生
   ↓
-  PiBridge 把事件存进队列 → [{ type: "compile_done", data: {errors: 2} }]
+  PiBridge 存进队列 → [{ type: "compile_done", data: {errors: 2} }]
   ↓
-  （Agent 还在思考下一步，还没调 unity_wait）
+  （Agent 还在思考，还没发起 SSE 连接）
   ↓
-Agent 调 unity_wait → 连 SSE
+Agent 调 unity_events subscribe → 连 SSE
   ↓
-  PiBridge 收到 SSE 连接：
+  PiBridge 收到连接：
     ① 先倒出队列积压 → event: compile_done
-    ② 转实时监听 → 挂住，等下一个事件
+    ② 转实时监听 → 挂住，等下个事件
+  ↓
+  SSE 回调 → pi.sendUserMessage() → Agent 看到消息
 ```
-
-**无论事件在 Agent 调 unity_wait 之前还是之后发生，都不会丢。**
-队列是安全网，SSE 是实时通道。
 
 ## 实现
 
-### PiBridge 侧：事件队列 + SSE 端点
+### PiBridge 侧：事件队列 + SSE 端点 + 订阅管理
 
 ```csharp
 // PiBridge.cs 新增
 static ConcurrentQueue<UnityEvent> _eventQueue = new();
-static ConcurrentDictionary<string, bool> _subscribedEvents = new();
+static ConcurrentDictionary<string, bool> _subscriptions = new();
 
-// 工具：Agent 注册要监听哪些事件
-case "subscribe-event":
-    var eventType = GetArg<string>(args, "event", "");
-    _subscribedEvents[eventType] = true;
+// 统一的订阅管理端点
+case "manage-subscriptions":
+    string action = GetArg<string>(args, "action", "");
+    string[] events = GetArg<string[]>(args, "events", Array.Empty<string>());
+
+    switch (action) {
+        case "subscribe":
+            foreach (var e in events) _subscriptions[e] = true;
+            break;
+        case "unsubscribe":
+            foreach (var e in events) _subscriptions.Remove(e);
+            break;
+        case "list":
+            return new Response { ok = true, result = _subscriptions.Keys.ToList() };
+    }
     return new Response { ok = true };
 
 // 在 EditorApplication.update 里检测状态变化
@@ -376,82 +385,145 @@ EditorApplication.update += () => {
     _wasCompiling = EditorApplication.isCompiling;
 };
 
-// SSE 端点：Agent 连上来，挂着等
+// SSE 端点
 case "events":
     response.ContentType = "text/event-stream";
-    response.Headers["Cache-Control"] = "no-cache";
 
-    // 第一步：先吐历史积压
-    while (_eventQueue.TryDequeue(out var ev))
-        WriteSSE(response, ev);
+    // 先吐积压
+    while (_eventQueue.TryDequeue(out var ev)) WriteSSE(response, ev);
 
-    // 第二步：转实时监听
+    // 转实时
     while (!_cancellation.Token.IsCancellationRequested) {
-        if (_eventQueue.TryDequeue(out var ev))
-            WriteSSE(response, ev);
-        else
-            Thread.Sleep(100);
+        if (_eventQueue.TryDequeue(out var ev)) WriteSSE(response, ev);
+        else Thread.Sleep(100);
     }
     break;
 ```
 
-### pi extension 侧：unity_wait 工具
+### pi extension 侧：一个 unity_events 工具
 
 ```typescript
 pi.registerTool({
-  name: "unity_wait",
-  description: "Wait for Unity events via SSE. Returns immediately when any event fires.",
-  parameters: {
-    events: { description: "Events to wait for, e.g. compile,playmode,error" },
-    timeout: { type: "number", default: 120 }
-  },
-  async execute(params, ctx) {
-    const bridge = await discoverBridge(ctx.cwd);
+    name: "unity_events",
+    description: "Manage Unity event subscriptions. " +
+        "Subscribe to get notified when things happen, " +
+        "unsubscribe to stop, list to see active subscriptions.",
+    parameters: {
+        action: { type: "string", enum: ["subscribe", "unsubscribe", "list"] },
+        events: {
+            type: "string[]",
+            description: "Events: compile, playmode, error. Required for subscribe/unsubscribe."
+        }
+    },
+    async execute(params, ctx) {
+        const bridge = await discoverBridge(ctx.cwd);
 
-    // 先订阅感兴趣的事件
-    await sendCommand(bridge.port, "subscribe-event", { event });
+        if (params.action === "list") {
+            return await sendCommand("manage-subscriptions", { action: "list" });
+        }
 
-    // 连 SSE，挂着等
-    const response = await fetch(
-        `http://127.0.0.1:${bridge.port}/events`,
-        { signal: AbortSignal.timeout(params.timeout * 1000) }
-    );
+        // subscribe 时启动后台 SSE 连接
+        if (params.action === "subscribe" && !sseController) {
+            sseController = new AbortController();
+            startSseLoop(pi, bridge.port, sseController.signal);
+        }
 
-    const reader = response.body.getReader();
-    // ... 读流，第一个事件到就返回 ...
-    return { event: parsed.type, data: parsed.data };
-  }
+        // unsubscribe 时关闭
+        if (params.action === "unsubscribe" && sseController) {
+            sseController.abort();
+            sseController = null;
+        }
+
+        return await sendCommand("manage-subscriptions", {
+            action: params.action,
+            events: params.events
+        });
+    }
 });
 ```
 
-## 为什么 SSE 而不是轮询
+### 后台 SSE 循环：事件来临时非阻塞通知 Agent
 
-| | HTTP 轮询 | SSE |
-|--|---------|-----|
-| **队列为空时** | 立即返回 []，Agent 要再问一次 | **挂着不返回，事件来了立刻吐** |
-| **Agent 逻辑** | 需要在 prompt 里写"每 500ms 轮询一次" | 一个 unity_wait，一行逻辑 |
-| **网络开销** | 无数空请求 | 一个长连接，零空转 |
-| **实现复杂度** | 极低 | 低（PiBridge 已有 HttpListener） |
+```typescript
+let sseController: AbortController | null = null;
 
-对 Unity 场景来说，500ms 轮询确实也能用。但 SSE 让 Agent 的思维更简单——不需要在 prompt 里嵌入轮询逻辑，"我等一个事件"一句话就够了。
+async function startSseLoop(pi, port, signal) {
+    const response = await fetch(`http://127.0.0.1:${port}/events`, { signal });
+    const reader = response.body.getReader();
+
+    while (!signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        for (const event of parseSSE(value)) {
+            // 非阻塞：直接塞给 Agent
+            pi.sendUserMessage(
+                `[Unity 事件] ${event.type}`,
+                { deliverAs: "followUp" }
+            );
+        }
+    }
+}
+```
+
+**`pi.sendUserMessage()` + SSE 后台连接 = MCP 做不到的实时协作。**
+
+## 与阻塞 wait 对比
+
+| | 阻塞 wait（旧方案，已废弃） | 非阻塞订阅（最终方案） |
+|----------|-----------|
+| Agent 行为 | 挂着啥也不干 | 继续干活/思考 |
+| Unity 编译 30 秒 | Agent 发呆 30 秒 | Agent 写代码/查文档 |
+| 生命周期 | 每次都要重新调 | 订一次一直有效，直到取消 |
+| MCP 能复制？ | 能（轮询即可） | **不能，pi 独有** |
 
 ## 场景一：编译→自动诊断闭环
 
 ```
 Agent: "帮我修一下这个编译错误"
-    ① subscribe-event compile
+    ① unity_events subscribe events=compile
     ② unity_command compile（触发编译）
-    ③ unity_wait（SSE 挂着等）
-       ↓
-       PiBridge 推 compile_done { errors: 2 }
-       ↓
-    ④ 收到事件 → 自动调 unity_log 抓错误
+        → Agent 去干别的事了
+    ③ Unity 编译完成
+        → PiBridge 推 compile_done
+        → SSE 回调 → pi.sendUserMessage()
+        → Agent 看到消息
+    ④ 自动调 unity_log 抓错误
     ⑤ 分析 CS0103 → 缺 using → 自动加
     ⑥ unity_command compile 再试
-    ⑦ unity_wait 再等 → compile_done { errors: 0 }
-    ⑧ 通知用户 "已修复"
+    ⑦ compile_done 再来 → 编译通过
+    ⑧ unity_events unsubscribe events=compile
+    ⑨ 通知用户 "已修复"
 ```
 
+## 场景二：Play Mode 崩溃自动抓现场
+
+```
+Agent: "进入 Play Mode 测试"
+    ① unity_events subscribe events=playmode,error
+    ② unity_command play --mode enter
+        → Agent 去干别的事了
+    ③ Play Mode 崩溃
+        → PiBridge 推 playmode_exit + error_occurred
+        → SSE 回调 → pi.sendUserMessage()
+        → Agent 看到消息
+    ④ 自动调 screenshot 抓画面
+    ⑤ 自动调 unity_log 抓异常
+    ⑥ 分析并修复
+```
+
+## 与 MCP 的本质区别
+
+| | MCP（官方 CLI 等） | PiBridge（非阻塞订阅） |
+|--|-----|-------------|
+| **范式** | 请求-响应 | 事件驱动 |
+| **实时性** | 靠 Agent 轮询 | PiBridge 主动推 |
+| **Play Mode 崩溃** | Agent 不知道，等用户说 | 主动打断 Agent |
+| **编译闭环** | Agent 傻等 | Agent 一边干活一边等消息 |
+| **跨工具协作** | 不可能 | **pi 独有：extension 后台 + sendUserMessage** |
+
+**PiBridge 不是 MCP 的替代品，也不是 MCP 的包装器。**
+它是 pi Agent 和 Unity 之间的**双向通道**——MCP 只做到了一半。
 
 
 ---
@@ -482,7 +554,7 @@ Unity 的 Build 过程**完全跳过 `Editor/` 文件夹**，不会打进发布�
 | 🔴 P0 | **Roslyn eval**（已提案） | ~半天 | 核心能力，覆盖 80% 场景 |
 | 🔴 P0 | **Play Mode 控制** | ~10 行 C# | Agent 能自测闭环 |
 | 🔴 P0 | **截图** | ~30 行 C# + 管道 | eval 做不到的事 |
-| 🔴 P0 | **双向事件驱动** | ~半天（SSE + unity_wait） | MCP 做不到的事，pi 独有优势 |
+| 🔴 P0 | **非阻塞事件订阅** | ~半天（SSE + pi.sendUserMessage） | **MCP 做不到，pi 独有：Agent 不等消息，事件来了主动打断** |
 | 🟡 P1 | **反射自动发现 + 自定义命令** | ~2h | 可扩展性，用户能自己加工具 |
 | 🟢 P2 | **MCP 包装** | ~2h | 跨 Agent 可用 |
 | ⚪ 不做 | GameObject / 场景/ 包管理 / Profiler ... | — | eval 已覆盖 |
