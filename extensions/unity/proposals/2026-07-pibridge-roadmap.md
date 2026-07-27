@@ -1,4 +1,4 @@
-# Roslyn Eval + 其他增强方向 — PiBridge 能力补齐提案
+# PiBridge 能力补齐路线图 — Roslyn eval / 事件驱动 / 设计哲学
 
 **Status:** 提案  
 **Date:** 2026-07-26  
@@ -308,7 +308,149 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 做 MCP 包装只需要适配协议层，C# 侧一行不改。
 
 
-## 不做（eval 替代）
+# PiBridge 的独特优势：双向事件驱动
+
+目前所有 Unity MCP 项目（包括官方 CLI）都是**请求-响应模式**：
+Agent 问一句，Unity 答一句，Agent 再问下一句。
+
+PiBridge + pi extension 的组合可以做 **双向事件驱动**——
+Unity 侧能主动推事件，pi 侧收到后自动触发 Agent。
+
+## 架构
+```
+                   请求（HTTP POST）
+Agent / pi extension ──────────────────→ PiBridge (Unity Editor)
+      │                                       │
+      │    ← 事件推送（SSE 长连接）           │
+      │    ← compile_done, playmode_exit,    │
+      │       error_occurred, import_finished │
+      │                                       │
+      └──────────── 自动通知 Agent ──────────┘
+```
+
+## 实现方式
+
+### PiBridge 侧：新增 SSE 端点
+
+```csharp
+// PiBridge.cs 加一个 /events 端点
+case "events":
+    // SSE (Server-Sent Events) — 长连接持续推送
+    response.ContentType = "text/event-stream";
+    while (connection alive) {
+        if (HasNewEvent(out var ev))
+            WriteSSE(response, $"event: {ev.type}\ndata: {ev.json}\n\n");
+        Thread.Sleep(100);
+    }
+```
+
+PiBridge 内部用 `EditorApplication.update` 或事件监听检测状态变化：
+
+```csharp
+// 监听状态变化
+EditorApplication.update += () => {
+    if (_wasCompiling && !EditorApplication.isCompiling)
+        PushEvent("compile_done", new { errors = GetErrorCount() });
+    if (_wasPlaying && !EditorApplication.isPlaying)
+        PushEvent("playmode_exit", new { duration = ... });
+    _wasCompiling = EditorApplication.isCompiling;
+    _wasPlaying = EditorApplication.isPlaying;
+};
+```
+
+### pi extension 侧：新增等待工具
+
+```typescript
+pi.registerTool({
+  name: "unity_wait",
+  description: "Wait for a Unity event to happen and return immediately when it does.",
+  parameters: {
+    events: { description: "Events to wait for: compile, playmode, error, import" },
+    timeout: { type: "number", default: 120 }
+  },
+  async execute(params, ctx) {
+    const bridge = await discoverBridge(ctx.cwd);
+    // 连接 SSE，长等待直到事件触发或超时
+    const response = await fetch(`http://127.0.0.1:${bridge.port}/events?types=${params.events}`);
+    for await (const chunk of streamAsyncIterator(response.body)) {
+      return { event: chunk.event, data: JSON.parse(chunk.data) };
+    }
+  }
+});
+```
+
+## 场景一：编译→自动诊断闭环（最实用）
+
+```
+Agent: "帮我修一下这个编译错误"
+    ① unity_command compile（触发编译）
+    ② unity_wait events=compile timeout=120（等）
+       ↓
+       PiBridge 推 compile_done { errors: 2 }
+       ↓
+    ③ 收到事件 → 自动调 unity_log 抓错误
+    ④ 分析 CS0103 → 缺 using → 自动加
+    ⑤ unity_command compile 再试
+    ⑥ unity_wait 再等 → compile_done { errors: 0 }
+    ⑦ 通知用户 "已修复"
+```
+
+**一次对话，Agent 自己迭代到编译通过。**
+
+## 场景二：Play Mode 崩溃自动抓现场
+
+```
+Agent: "进入 Play Mode 测试"
+    ① unity_command play --mode enter
+    ② unity_wait events=playmode,error timeout=300
+       ↓
+       用户操作几分钟后，Play Mode 崩溃退出
+       PiBridge 推 playmode_exit（含崩溃时间）
+       PiBridge 推 error_occurred（含异常信息）
+       ↓
+    ③ 收到两个事件 → 自动调 screenshot（抓当前画面）
+    ④ 自动调 unity_log（抓最后 50 行异常）
+    ⑤ 分析："NullReferenceException，Main Camera 被销毁了"
+    ⑥ 自动修复 → 编译 → 再测
+```
+
+**崩溃瞬间 Agent 就知道了，不等用户来喊。**
+
+## 场景三：迭代式开发助手
+
+```
+用户一边在 Unity 里调场景，一边开着 pi
+
+每当用户退出 Play Mode：
+    PiBridge → playmode_exit
+    → pi 通知 Agent
+    → Agent 看一眼场景状态
+    → 主动给建议："你把这个数值调到 50 了，要不要试试调材质颜色？"
+
+用户不需要手动告诉 Agent "你看一下"
+PiBridge 推了就知道了。
+
+这种"陪在你旁边看着"的体验，
+请求-响应模式的 MCP 做不到。
+```
+
+## 与 MCP 的本质区别
+
+| | MCP（官方 CLI 等） | PiBridge 双向 |
+|--|-----|-------------|
+| **范式** | 请求-响应 | 事件驱动 |
+| **实时性** | 靠 Agent 轮询（"好了没？好了没？"） | PiBridge 主动推 |
+| **Play Mode 崩溃** | Agent 不知道，等用户说 | 自动抓现场 + 自动诊断 |
+| **编译闭环** | 需要用户说"再检查一下" | 自动循环直到通过 |
+| **协作感** | Agent 是工具 | Agent 是搭档 |
+
+**pi extension 不是 MCP 的替代品，也不是 MCP 的包装器。**
+它是 pi Agent 和 Unity 之间的**双向通道**——MCP 只做到了一半。
+
+
+---
+
+# 不做（eval 替代）
 
 | MCP 项目有 | 为什么 PiBridge 不做 |
 |-----------|-------------------|
@@ -320,13 +462,12 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 | 多重实例 | 个人使用场景极少 |
 
 
-## Build 安全说明
+---
+
+# Build 安全说明
 
 PiBridge 的所有 `.cs` 文件放在 `Assets/Editor/` 下，
 Unity 的 Build 过程**完全跳过 `Editor/` 文件夹**，不会打进发布的游戏/应用中。
-
-
----
 
 # 优先级建议（更新版）
 
@@ -335,8 +476,9 @@ Unity 的 Build 过程**完全跳过 `Editor/` 文件夹**，不会打进发布�
 | 🔴 P0 | **Roslyn eval**（已提案） | ~半天 | 核心能力，覆盖 80% 场景 |
 | 🔴 P0 | **Play Mode 控制** | ~10 行 C# | Agent 能自测闭环 |
 | 🔴 P0 | **截图** | ~30 行 C# + 管道 | eval 做不到的事 |
+| 🔴 P0 | **双向事件驱动** | ~半天（SSE + unity_wait） | MCP 做不到的事，pi 独有优势 |
 | 🟡 P1 | **反射自动发现 + 自定义命令** | ~2h | 可扩展性，用户能自己加工具 |
 | 🟢 P2 | **MCP 包装** | ~2h | 跨 Agent 可用 |
 | ⚪ 不做 | GameObject / 场景/ 包管理 / Profiler ... | — | eval 已覆盖 |
 
-**核心理念：** 5-6 个精心设计的工具 + 强 eval，胜过 70 个细分工具。
+**核心理念：** 5-6 个精心设计的工具 + 强 eval + 双向事件驱动，胜过 70 个细分工具。
