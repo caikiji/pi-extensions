@@ -1,6 +1,6 @@
 # unity — pi extension for Unity Editor integration
 
-让 pi (coding agent) 能方便地**读取 Unity 日志**、**操控运行中的 Unity Editor**、**操作 Unity 项目文件**。
+让 pi (coding agent) 能方便地**读取 Unity 日志**、**操控运行中的 Unity Editor**、**读项目元信息**。
 
 支持 Unity 2019.4 LTS 及之后所有版本(2020.3 / 2021.3 / 2022.3 / Unity 6)。
 
@@ -11,7 +11,7 @@
 Unity 开发者用 pi 时,agent 应该能:
 1. **看懂 Unity 在干什么** — 读 Editor.log / AssetImportWorker 日志,提取编译错误、导入错误、异常
 2. **操控运行中的 Unity** — 通过 PiBridge HTTP bridge 在已打开的 Editor 里执行命令(不用启动第二个实例)
-3. **安全操作项目文件** — 读写 YAML/JSON 文本资产,绝不破坏 GUID 引用
+3. **读项目元信息** — 读 ProjectVersion / asmdef / manifest.json,不碰 GUID 引用
 
 核心原则:**单一执行路径** — 通过 PiBridge HTTP bridge 驱动**已打开的** Unity Editor 实例(不新开 batchmode 进程,避免冷启动与实例冲突)。
 
@@ -66,7 +66,7 @@ extensions/unity/
 ├── package.json                # pi 扩展声明
 ├── PiBridge/                   # C# HTTP bridge(装到项目 Assets/Editor/PiBridge/ 用)
 │   ├── PiBridge.cs             # 主类:HttpListener + 命令派发 + ExecuteCommand
-│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验)
+│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验;当前 0.3.0)
 │   ├── WindowFocus.cs          # Win32 聚焦逻辑(绕过失焦节流)
 │   ├── Response.cs             # 响应结构
 │   └── SimpleJson.cs           # 极简 JSON 序列化/解析
@@ -92,7 +92,7 @@ extensions/unity/
 ### 0. `unity_command` — 操控运行中的 Unity(通过 PiBridge)
 让 AI 在**已打开的** Unity Editor 里执行命令,不用启动第二个实例。
 
-**前提**:项目 `Assets/Editor/PiBridge/` 下有 `PiBridge.cs`(见下文「PiBridge 安装」)。扩展会校验 bridge 版本,过旧时报错并提示用 `unity_install_bridge` 更新。
+**前提**:项目 `Assets/Editor/PiBridge/` 下有 PiBridge 的 `.cs`(见下文「PiBridge 安装」)。扩展会校验 bridge 版本,过旧(含旧版装在 `Assets/Editor/` 根目录的平铺布局)时报 `versionMismatch` 并提示用 `unity_install_bridge` 重装。
 
 **参数**:
 - `command`: `ping` | `config` | `refresh` | `compile` | `status` | `run-menu` | `asset-info` | `log` | `eval`
@@ -101,8 +101,8 @@ extensions/unity/
 - `timeout?`:秒,默认 60(`run-menu` 默认 15)
 
 **流程**:
-1. `bridge-client.ts` 读 `Temp/pi-bridge-port` 发现端口(回退探测 17841+)
-2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`,过旧则返回 `versionMismatch` 错误
+1. `bridge-client.ts` 读 `Temp/pi-bridge-port` 发现端口(仅在端口文件存在时探测,避免 20 端口扫延迟);端口文件缺失则视为未安装
+2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`(当前 `0.3.0`),过旧则返回 `versionMismatch` 错误
 3. HTTP POST `http://127.0.0.1:{port}/{command}`,body 是 args 的 JSON
 4. PiBridge 后台线程收到 → `EditorApplication.delayCall` 派发主线程(失焦时先自动聚焦,见下)→ 执行 → 返回 JSON
 5. 返回 `{ ok, result?, error?, durationMs }`
@@ -125,13 +125,13 @@ extensions/unity/
 - `projectPath?: string` — 默认 cwd
 - `kind?: "editor" | "import" | "package" | "player" | "all"` — 默认 `editor`
 - `filter?: "errors" | "warnings" | "compile" | "exceptions" | "all"` — 默认 `errors`
-- `tail?: number` — 最后 N 行(默认 200)
-- `since?: string` — ISO 时间戳,只看之后的内容
+- `tail?: number` — 最后 N 行(默认 500)
+- `since?: string` — ISO 时间戳,只看之后的内容(仅文件解析生效;bridge 条目无时间戳)
 
 **流程**:
-1. **Editor console**:PiBridge 在线时优先走 bridge `/log`（返回结构化条目，含 info 级 `Debug.Log`，不受 Editor.log 解析/格式限制）；离线时回退到读 `Editor.log` 文件（项目级优先，全局回退，Windows share-read 绕过独占锁）
+1. **Editor console**:PiBridge 在线时优先走 bridge `/log`(返回结构化条目,含 info 级 `Debug.Log`,不受 Editor.log 解析/格式限制);仅在设了 `since` 或无 `Temp/pi-bridge-port`(bridge 未装)时回退到读 `Editor.log` 文件(项目级优先,全局回退,Windows share-read 绕过独占锁)
 2. `log-parser.ts` / bridge mapper 按 filter 提取,结构化为 `{severity, file, line, col, code, message, stack?}[]`
-3. **import / package / player** kind 始终读文件（bridge 无对应端点）
+3. **import / package / player** kind 始终读文件(bridge 无对应端点)
 4. 返回 JSON + 可读文本;`sources[].source` 标明每条来自 `bridge` / `project` / `global`
 
 **返回示例**:
@@ -150,21 +150,27 @@ extensions/unity/
 }
 ```
 
+
+---
+
 ### 2. `unity_status` — 检测 Unity 状态
 
-**参数**:`projectPath?: string`（默认 cwd）
+**参数**:`projectPath?: string`(默认 cwd)
 
 **流程**:
-1. 读 `Temp/UnityLockfile` 判 `isRunning`（存在 + Windows 文件锁探测）
-2. Compiling/Importing **优先用 bridge `/status`** 的 `EditorApplication.isCompiling` / `isUpdating`（权威值）；bridge 离线才回退到 Editor.log 尾 200 行关键词启发式（可能假阳性）
-3. 返回 `statusSource: "bridge" | "heuristic" | "none"` 标明 Compiling/Importing 来源,便于判断可信度
+1. 读 `Temp/UnityLockfile` 判 `isRunning`(存在 + Windows 文件锁探测)
+2. Compiling/Importing **优先用 bridge `/status`** 的 `EditorApplication.isCompiling` / `isUpdating`(权威值);bridge 在线时 `isRunning` 也随之修正为 true(修正非 Windows,lockfile 探测在那里是 no-op)
+3. 仅当 bridge 未装/离线时回退到 Editor.log 尾 200 行关键词启发式(可能假阳性)
+4. 返回 `statusSource: "bridge" | "heuristic" | "none"` 标明 Compiling/Importing 来源,便于判断可信度
 
 ### 3. `unity_project` — 读项目元信息
+返回 Unity 版本(来自 `ProjectVersion.txt`)、所有 `.asmdef` 程序集及其引用、`manifest.json` 中的包、脚本后端(Mono/IL2CPP,按平台读 ProjectSettings)、序列化模式(读 `EditorSettings.asset`)。全部只读。
+
 ---
 
 ## PiBridge 安装(启用 unity_command 的前提)
 
-`PiBridge.cs` 是一个 C# 文件,放在 Unity 项目的 `Assets/Editor/PiBridge/` 下,自动随项目加载启动一个 HTTP bridge,让外部进程(AI)能操控运行中的 Editor。
+`PiBridge` 是一组 C# 文件,放在 Unity 项目的 `Assets/Editor/PiBridge/` 下,随项目加载自动启动一个 HTTP bridge,让外部进程(AI)能操控运行中的 Editor。
 
 ### 方式 A:用 `unity_install_bridge` 工具自动安装(推荐)
 
@@ -172,7 +178,7 @@ extensions/unity/
 ```
 unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
 ```
-工具会自动:把 `PiBridge/*.cs` 复制到 `<projectPath>/Assets/Editor/PiBridge/`(覆盖同名旧版)、确保目录存在、迁移旧版直接装在 `Assets/Editor/` 下的平铺文件(只删声明了 `namespace PiBridge` 的,避免误删用户同名脚本)、返回安装路径和后续步骤。若其他 unity 命令出错(版本不匹配/超时/连接错误),AI 会自动重装作为首选排查。
+工具会自动:把 `PiBridge/*.cs` 复制到 `<projectPath>/Assets/Editor/PiBridge/`(覆盖同名旧版)、确保目录存在、返回安装路径和后续步骤。旧版直接装在 `Assets/Editor/` 下的 bridge 会被检测为版本过旧(见下文「版本校验」),重装即迁移到子文件夹。若其他 unity 命令出错(版本不匹配/超时/连接错误),AI 会自动重装作为首选排查。
 
 ### 方式 B:手动安装
 1. 把 `extensions/unity/PiBridge/` 目录(含所有 `.cs`)整个复制到你的 Unity 项目 `Assets/Editor/`(没有 `Editor` 文件夹就新建一个),最终结构为 `Assets/Editor/PiBridge/*.cs`
@@ -205,7 +211,7 @@ Unity Editor 失焦时,`EditorApplication.delayCall`/`update` 被节流到 ~1Hz(
 
 ### 已知限制
 - `run-menu` 调 `EditorApplication.ExecuteMenuItem` 是同步阻塞的,若触发模态对话框会冻结主线程导致 bridge 无响应(15s 超时 + 拒绝在已有对话框时执行)
-- 首次安装 PiBridge 后需 Unity 获得焦点触发编译(旧 bridge 无自动聚焦能力,第一次需手动给焦点)
+- 首次安装/更新 PiBridge 后需 Unity 获得焦点触发编译(若 bridge 未起来,`unity_command` 会提示重装)
 
 ---
 
