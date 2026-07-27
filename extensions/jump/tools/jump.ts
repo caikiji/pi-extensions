@@ -104,16 +104,15 @@ export function registerJump(pi: ExtensionAPI, state: GraphState): void {
 
       // The physical tool result text is the same deterministic string the
       // projection re-injects, so the LLM never sees a discrepancy between
-      // the real result and the synthesized one.
+      // the real result and the synthesized one. We do NOT re-append the
+      // payload or a folded-count echo here: both are already part of
+      // synthesizeJumpResultText / synthesizePayloadText (which projection
+      // re-injects next turn), and the payload is the model's own input —
+      // re-echoing it in the result would just burn tokens.
       const resultText = synthesizeJumpResultText(jumpNode);
-      const payloadText = params.payload ? `\n\npayload:\n${params.payload}` : "";
-      const metricsText =
-        foldedCount > 0
-          ? `\nFolded ${foldedCount} message(s) out of your view. Recover them later by jumping to \`${toolCallId}\` or with label_peek.`
-          : "";
 
       return {
-        content: [{ type: "text", text: `${resultText}${metricsText}${payloadText}` }],
+        content: [{ type: "text", text: resultText }],
         details: {
           jumped: true,
           branchId: toolCallId,

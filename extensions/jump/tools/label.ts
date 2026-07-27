@@ -45,8 +45,7 @@ export function registerLabel(pi: ExtensionAPI, state: GraphState): void {
               "Label created.\nid: " +
               toolCallId +
               (params.note ? "\nnote: " + params.note : "") +
-              "\nUse `jump` with this id to return here and pop everything added since." +
-              "\nTip: a good note states why you placed this label + your next step — it is the plan-end of the thread you'll reconnect after a jump.",
+              "\nUse `jump` with this id to return here and pop everything added since.",
           },
         ],
         details: { id: toolCallId, note: params.note },
