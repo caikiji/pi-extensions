@@ -314,138 +314,144 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 Agent 问一句，Unity 答一句，Agent 再问下一句。
 
 PiBridge + pi extension 的组合可以做 **双向事件驱动**——
-Unity 侧能主动推事件，pi 侧收到后自动触发 Agent。
+Agent 不需要轮询，PiBridge 通过 SSE 把事件主动推过来。
 
-## 架构
+## 架构（非常简单）
+
 ```
-                   请求（HTTP POST）
+                       请求（HTTP POST）
 Agent / pi extension ──────────────────→ PiBridge (Unity Editor)
       │                                       │
-      │    ← 事件推送（SSE 长连接）           │
-      │    ← compile_done, playmode_exit,    │
-      │       error_occurred, import_finished │
-      │                                       │
-      └──────────── 自动通知 Agent ──────────┘
+      │  ← /events SSE 长连接                 │
+      │  ← 先吐出历史积压事件                  │
+      │  ← 然后转实时推送                     │
+      │  ← compile_done, playmode_exit,       │
+      │     error_occurred, import_finished    │
 ```
 
-## 实现方式
+**只有 PiBridge 是服务端，pi 是客户端。** 没有额外端口，没有双向 HTTP。
 
-### PiBridge 侧：新增 SSE 端点
+## 事件队列 + SSE（事件永不丢失）
 
-```csharp
-// PiBridge.cs 加一个 /events 端点
-case "events":
-    // SSE (Server-Sent Events) — 长连接持续推送
-    response.ContentType = "text/event-stream";
-    while (connection alive) {
-        if (HasNewEvent(out var ev))
-            WriteSSE(response, $"event: {ev.type}\ndata: {ev.json}\n\n");
-        Thread.Sleep(100);
-    }
+PiBridge 内部维护一个 FIFO 事件队列。SSE 连接建立时，先把队列里积压的事件一次性吐出，然后转入实时模式：
+
+```
+时间线：
+
+compile_done 发生
+  ↓
+  PiBridge 把事件存进队列 → [{ type: "compile_done", data: {errors: 2} }]
+  ↓
+  （Agent 还在思考下一步，还没调 unity_wait）
+  ↓
+Agent 调 unity_wait → 连 SSE
+  ↓
+  PiBridge 收到 SSE 连接：
+    ① 先倒出队列积压 → event: compile_done
+    ② 转实时监听 → 挂住，等下一个事件
 ```
 
-PiBridge 内部用 `EditorApplication.update` 或事件监听检测状态变化：
+**无论事件在 Agent 调 unity_wait 之前还是之后发生，都不会丢。**
+队列是安全网，SSE 是实时通道。
+
+## 实现
+
+### PiBridge 侧：事件队列 + SSE 端点
 
 ```csharp
-// 监听状态变化
+// PiBridge.cs 新增
+static ConcurrentQueue<UnityEvent> _eventQueue = new();
+static ConcurrentDictionary<string, bool> _subscribedEvents = new();
+
+// 工具：Agent 注册要监听哪些事件
+case "subscribe-event":
+    var eventType = GetArg<string>(args, "event", "");
+    _subscribedEvents[eventType] = true;
+    return new Response { ok = true };
+
+// 在 EditorApplication.update 里检测状态变化
 EditorApplication.update += () => {
     if (_wasCompiling && !EditorApplication.isCompiling)
-        PushEvent("compile_done", new { errors = GetErrorCount() });
-    if (_wasPlaying && !EditorApplication.isPlaying)
-        PushEvent("playmode_exit", new { duration = ... });
+        _eventQueue.Enqueue(new UnityEvent("compile_done", new { errors = ... }));
     _wasCompiling = EditorApplication.isCompiling;
-    _wasPlaying = EditorApplication.isPlaying;
 };
+
+// SSE 端点：Agent 连上来，挂着等
+case "events":
+    response.ContentType = "text/event-stream";
+    response.Headers["Cache-Control"] = "no-cache";
+
+    // 第一步：先吐历史积压
+    while (_eventQueue.TryDequeue(out var ev))
+        WriteSSE(response, ev);
+
+    // 第二步：转实时监听
+    while (!_cancellation.Token.IsCancellationRequested) {
+        if (_eventQueue.TryDequeue(out var ev))
+            WriteSSE(response, ev);
+        else
+            Thread.Sleep(100);
+    }
+    break;
 ```
 
-### pi extension 侧：新增等待工具
+### pi extension 侧：unity_wait 工具
 
 ```typescript
 pi.registerTool({
   name: "unity_wait",
-  description: "Wait for a Unity event to happen and return immediately when it does.",
+  description: "Wait for Unity events via SSE. Returns immediately when any event fires.",
   parameters: {
-    events: { description: "Events to wait for: compile, playmode, error, import" },
+    events: { description: "Events to wait for, e.g. compile,playmode,error" },
     timeout: { type: "number", default: 120 }
   },
   async execute(params, ctx) {
     const bridge = await discoverBridge(ctx.cwd);
-    // 连接 SSE，长等待直到事件触发或超时
-    const response = await fetch(`http://127.0.0.1:${bridge.port}/events?types=${params.events}`);
-    for await (const chunk of streamAsyncIterator(response.body)) {
-      return { event: chunk.event, data: JSON.parse(chunk.data) };
-    }
+
+    // 先订阅感兴趣的事件
+    await sendCommand(bridge.port, "subscribe-event", { event });
+
+    // 连 SSE，挂着等
+    const response = await fetch(
+        `http://127.0.0.1:${bridge.port}/events`,
+        { signal: AbortSignal.timeout(params.timeout * 1000) }
+    );
+
+    const reader = response.body.getReader();
+    // ... 读流，第一个事件到就返回 ...
+    return { event: parsed.type, data: parsed.data };
   }
 });
 ```
 
-## 场景一：编译→自动诊断闭环（最实用）
+## 为什么 SSE 而不是轮询
+
+| | HTTP 轮询 | SSE |
+|--|---------|-----|
+| **队列为空时** | 立即返回 []，Agent 要再问一次 | **挂着不返回，事件来了立刻吐** |
+| **Agent 逻辑** | 需要在 prompt 里写"每 500ms 轮询一次" | 一个 unity_wait，一行逻辑 |
+| **网络开销** | 无数空请求 | 一个长连接，零空转 |
+| **实现复杂度** | 极低 | 低（PiBridge 已有 HttpListener） |
+
+对 Unity 场景来说，500ms 轮询确实也能用。但 SSE 让 Agent 的思维更简单——不需要在 prompt 里嵌入轮询逻辑，"我等一个事件"一句话就够了。
+
+## 场景一：编译→自动诊断闭环
 
 ```
 Agent: "帮我修一下这个编译错误"
-    ① unity_command compile（触发编译）
-    ② unity_wait events=compile timeout=120（等）
+    ① subscribe-event compile
+    ② unity_command compile（触发编译）
+    ③ unity_wait（SSE 挂着等）
        ↓
        PiBridge 推 compile_done { errors: 2 }
        ↓
-    ③ 收到事件 → 自动调 unity_log 抓错误
-    ④ 分析 CS0103 → 缺 using → 自动加
-    ⑤ unity_command compile 再试
-    ⑥ unity_wait 再等 → compile_done { errors: 0 }
-    ⑦ 通知用户 "已修复"
+    ④ 收到事件 → 自动调 unity_log 抓错误
+    ⑤ 分析 CS0103 → 缺 using → 自动加
+    ⑥ unity_command compile 再试
+    ⑦ unity_wait 再等 → compile_done { errors: 0 }
+    ⑧ 通知用户 "已修复"
 ```
 
-**一次对话，Agent 自己迭代到编译通过。**
-
-## 场景二：Play Mode 崩溃自动抓现场
-
-```
-Agent: "进入 Play Mode 测试"
-    ① unity_command play --mode enter
-    ② unity_wait events=playmode,error timeout=300
-       ↓
-       用户操作几分钟后，Play Mode 崩溃退出
-       PiBridge 推 playmode_exit（含崩溃时间）
-       PiBridge 推 error_occurred（含异常信息）
-       ↓
-    ③ 收到两个事件 → 自动调 screenshot（抓当前画面）
-    ④ 自动调 unity_log（抓最后 50 行异常）
-    ⑤ 分析："NullReferenceException，Main Camera 被销毁了"
-    ⑥ 自动修复 → 编译 → 再测
-```
-
-**崩溃瞬间 Agent 就知道了，不等用户来喊。**
-
-## 场景三：迭代式开发助手
-
-```
-用户一边在 Unity 里调场景，一边开着 pi
-
-每当用户退出 Play Mode：
-    PiBridge → playmode_exit
-    → pi 通知 Agent
-    → Agent 看一眼场景状态
-    → 主动给建议："你把这个数值调到 50 了，要不要试试调材质颜色？"
-
-用户不需要手动告诉 Agent "你看一下"
-PiBridge 推了就知道了。
-
-这种"陪在你旁边看着"的体验，
-请求-响应模式的 MCP 做不到。
-```
-
-## 与 MCP 的本质区别
-
-| | MCP（官方 CLI 等） | PiBridge 双向 |
-|--|-----|-------------|
-| **范式** | 请求-响应 | 事件驱动 |
-| **实时性** | 靠 Agent 轮询（"好了没？好了没？"） | PiBridge 主动推 |
-| **Play Mode 崩溃** | Agent 不知道，等用户说 | 自动抓现场 + 自动诊断 |
-| **编译闭环** | 需要用户说"再检查一下" | 自动循环直到通过 |
-| **协作感** | Agent 是工具 | Agent 是搭档 |
-
-**pi extension 不是 MCP 的替代品，也不是 MCP 的包装器。**
-它是 pi Agent 和 Unity 之间的**双向通道**——MCP 只做到了一半。
 
 
 ---
