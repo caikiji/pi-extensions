@@ -55,7 +55,7 @@ import { registerJump } from "./tools/jump.ts";
 import { registerLabelList } from "./tools/label-list.ts";
 import { registerLabelPeek } from "./tools/label-peek.ts";
 
-export default function contextGraph(pi: ExtensionAPI) {
+export default function jump(pi: ExtensionAPI) {
   const state = new GraphState();
 
   // ---- events ----

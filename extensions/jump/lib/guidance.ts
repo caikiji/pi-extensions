@@ -8,7 +8,7 @@
 
 /** One-liner shown in the Available tools section of the system prompt. */
 export const COMMON_ANTI_PATTERN_SNIPPET =
-  "label/jump: navigable jump. Use for long exploratory sub-tasks you want to fold away; NOT for short/linear work.";
+  "label/jump: navigable context anchors. Use for long exploratory sub-tasks you want to fold away; NOT for short/linear work.";
 
 /** Guideline bullets for the `label` tool. */
 export const LABEL_GUIDELINES = [
