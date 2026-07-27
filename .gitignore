@@ -1,0 +1,2 @@
+# Dependencies (installed locally for type-checking, not part of the package)
+node_modules/

@@ -1,0 +1,10 @@
+{
+  "name": "pi-jump",
+  "version": "0.1.0",
+  "description": "Navigable context anchors for pi: label/jump to fold away intermediate work, peek folded branches, context-metrics awareness",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
