@@ -113,6 +113,11 @@ export default function jump(pi: ExtensionAPI) {
   pi.on("agent_settled", async () => {
     if (state.activeJumpId !== null) {
       state.activeJumpId = null;
+      // Clear the folded estimate too — it's only meaningful WHILE a jump is
+      // active. Leaving it stale lets a later jump with an unresolvable
+      // target (anchorIndex<0, projection passthrough) still report a
+      // bogus in-view<physical, falsely implying a fold took effect.
+      state.lastFoldedEstimate = null;
       state.persist(pi);
     }
   });
