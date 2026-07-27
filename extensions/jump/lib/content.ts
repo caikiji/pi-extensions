@@ -91,3 +91,12 @@ export function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
+
+/** Hard cap a string to `max` chars WITHOUT collapsing whitespace (unlike
+ *  `truncate`, which flattens whitespace for one-line previews). Used for
+ *  payloads/notes that may contain code or structured text. Appends a marker
+ *  + recovery hint when truncated. */
+export function capText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `\n…[truncated at ${max} chars; full text is in the folded messages — use label_peek to recover it]`;
+}

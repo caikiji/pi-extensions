@@ -41,7 +41,7 @@ export function registerLabelList(pi: ExtensionAPI, state: GraphState): void {
         if (n.kind === "label") {
           lines.push("");
           lines.push(`• [label] ${n.id}  (${ageStr})`);
-          lines.push(`    note: ${n.note ?? "(no note)"}`);
+          lines.push(`    note: ${n.note ? truncate(n.note, 160) : "(no note)"}`);
         } else {
           lines.push("");
           lines.push(`• [jump→${n.jumpedFrom ?? "?"}] ${n.id}  (${ageStr})`);

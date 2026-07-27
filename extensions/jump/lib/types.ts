@@ -45,6 +45,12 @@ export const PREVIEW_MAX = 200;
 /** Max chars label_peek returns of the folded region. */
 export const PEEK_MAX = 2000;
 
+/** Max chars of a label `note` / jump `payload` that we STORE and re-inject
+ *  on projection. A huge payload gets re-injected every projected turn and
+ *  would bloat the in-view context — capping bounds that cost. The full text
+ *  still lives in the folded physical messages and is recoverable via
+ *  label_peek. */
+export const PAYLOAD_MAX = 8000;
 /** Token estimate divisor — pi's own estimator uses chars/4, so we match it
  *  to keep our folded-region estimate roughly consistent with pi's physical
  *  count. This is a rough heuristic, not a precise tokenizer. */

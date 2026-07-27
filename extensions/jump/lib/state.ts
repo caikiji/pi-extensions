@@ -62,6 +62,11 @@ export class GraphState {
    *  no fold is active (in-view == physical then). */
   lastFoldedEstimate: number | null = null;
 
+  /** toolCallIds whose usage we have already counted, so overflow-retry or
+   *  duplicate tool_result events do not double-count (which would inflate the
+   *  cacheHit ratio). Reset on session_start. */
+  private seenUsageIds: Set<string> = new Set();
+
   /** Persist the current nodes map as a CustomEntry. activeJumpId is always
    *  persisted as null so a resumed session starts unfolded. */
   persist(pi: ExtensionAPI): void {
@@ -73,11 +78,17 @@ export class GraphState {
   }
 
   /** Prune oldest label nodes if the graph exceeds MAX_NODES. Jump nodes are
-   *  always retained because they are re-visit targets. */
+   *  always retained (they are re-visit targets), as are labels still pointed
+   *  to by some jump node's `jumpedFrom` — pruning those would orphan the
+   *  jump and make it silently no-op. */
   maybePrune(): void {
     if (this.nodes.size <= MAX_NODES) return;
+    const referenced = new Set<string>();
+    for (const n of this.nodes.values()) {
+      if (n.kind === "jump" && n.jumpedFrom) referenced.add(n.jumpedFrom);
+    }
     const labels = [...this.nodes.values()]
-      .filter((n) => n.kind === "label")
+      .filter((n) => n.kind === "label" && !referenced.has(n.id))
       .sort((a, b) => a.createdAt - b.createdAt);
     const excess = this.nodes.size - MAX_NODES;
     for (let i = 0; i < excess && i < labels.length; i++) {
@@ -96,13 +107,30 @@ export class GraphState {
     return -1;
   }
 
-  /** Lazily resolve anchorIndex for any node whose ToolResultMessage is now in
-   *  the live message array (called from the context event each turn). Returns
-   *  true if any anchor was newly resolved (so the caller can persist). */
+  /** Resolve/refresh anchorIndex for every node against the live message
+   *  array. Called from the context event each turn BEFORE project(). Each
+   *  node's stored index is VALIDATED: if the message at that index no longer
+   *  carries our toolCallId (it shifted due to compaction / fork / resume), it
+   *  is treated as stale, reset to -1, and re-resolved by toolCallId. This is
+   *  the fix for the compaction-stale-index bug: previously we skipped nodes
+   *  whose anchorIndex was already >= 0, so a compaction that rewrote the
+   *  array left them pointing at the wrong message forever. Returns true if
+   *  any anchor changed (newly resolved or re-resolved after invalidation). */
   resolveAnchors(messages: AgentMessage[]): boolean {
     let mutated = false;
     for (const node of this.nodes.values()) {
-      if (node.anchorIndex >= 0) continue;
+      const cur = node.anchorIndex;
+      const valid =
+        cur >= 0 &&
+        cur < messages.length &&
+        (messages[cur] as { role?: string; toolCallId?: string }).role === "toolResult" &&
+        (messages[cur] as { toolCallId?: string }).toolCallId === node.id;
+      if (valid) continue;
+      if (cur >= 0) {
+        // Stale index (points at the wrong message) — clear and re-resolve.
+        node.anchorIndex = -1;
+        mutated = true;
+      }
       const idx = GraphState.findToolResultIndex(messages, node.id);
       if (idx >= 0) {
         node.anchorIndex = idx;
@@ -110,6 +138,13 @@ export class GraphState {
       }
     }
     return mutated;
+  }
+
+  /** Mark every node's anchorIndex as stale (-1) so the next `context` event
+   *  re-resolves them by toolCallId. Called after compaction rewrites the
+   *  physical message array (and safe to call anytime). */
+  invalidateAnchors(): void {
+    for (const node of this.nodes.values()) node.anchorIndex = -1;
   }
 
   /** Reset runtime state on session_start, and restore persisted nodes from
@@ -121,6 +156,7 @@ export class GraphState {
     this.activeJumpId = null;
     this.lastMessages = null;
     this.cumulativeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    this.seenUsageIds.clear();
     this.lastContextUsage = null;
     this.lastFoldedEstimate = null;
 
@@ -150,9 +186,13 @@ export class GraphState {
   }
 
   /** Accumulate a provider-reported Usage into cumulativeUsage. Called from
-   *  tool_result events. Mirrors the footer's ↑↓R CH totals. */
-  accumulateUsage(u: Usage | undefined): void {
+   *  tool_result events. De-dupes by toolCallId so overflow-retry / duplicate
+   *  tool_result events don't double-count (which would inflate cacheHit).
+   *  Mirrors the footer's ↑↓R CH totals. */
+  accumulateUsage(toolCallId: string, u: Usage | undefined): void {
     if (!u) return;
+    if (this.seenUsageIds.has(toolCallId)) return;
+    this.seenUsageIds.add(toolCallId);
     this.cumulativeUsage.input += u.input ?? 0;
     this.cumulativeUsage.output += u.output ?? 0;
     this.cumulativeUsage.cacheRead += u.cacheRead ?? 0;

@@ -31,8 +31,8 @@ import type { GraphState } from "./state.ts";
 import type { GraphNode } from "./types.ts";
 
 /** Project the physical message list into what the LLM should see. Reads
- *  activeJumpId from state; if no jump is active (or the target anchor is
- *  unresolved), returns the messages unchanged (passthrough). */
+ *  activeJumpId from state; if no jump is active (or the target / jump anchor
+ *  is unresolved or out of range), returns the messages unchanged (passthrough). */
 export function project(state: GraphState, messages: AgentMessage[]): AgentMessage[] {
   if (!state.activeJumpId) return messages;
 
@@ -50,6 +50,18 @@ export function project(state: GraphState, messages: AgentMessage[]): AgentMessa
     return messages;
   }
 
+  // H2: the jump's OWN anchor must be resolved and sit strictly AFTER the
+  // target. If it is unresolved (-1), out of range, or not after the target,
+  // the tail cannot be computed safely — tailStart would be 0 and tail would
+  // duplicate the entire array on top of the prefix. Passthrough (safe);
+  // resolveAnchors re-resolves on the next context event.
+  if (
+    jumpNode.anchorIndex < 0 ||
+    jumpNode.anchorIndex >= messages.length ||
+    jumpNode.anchorIndex <= target.anchorIndex
+  ) {
+    return messages;
+  }
   const prefix = messages.slice(0, target.anchorIndex + 1);
 
   // Re-inject the jump's own result deterministically. We do NOT slice it

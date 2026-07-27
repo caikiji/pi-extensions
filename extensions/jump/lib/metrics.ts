@@ -45,7 +45,14 @@ export function buildContextReport(state: GraphState, ctx: MetricsCtx): string |
   // and subtract, so error stays bounded to that region.
   let inView: number | null = null;
   if (physical !== null && state.activeJumpId && state.lastFoldedEstimate !== null) {
-    inView = Math.max(0, physical - state.lastFoldedEstimate);
+    // The fold hid lastFoldedEstimate (chars/4) tokens. If that coarse estimate
+    // exceeds the real physical count (e.g. the folded region was code with a
+    // high char/token ratio), the estimate is unreliable — report physical
+    // instead of a misleading 0 ("you have no context left"). (L1.)
+    inView =
+      state.lastFoldedEstimate >= physical
+        ? physical
+        : physical - state.lastFoldedEstimate;
   } else if (physical !== null && !state.activeJumpId) {
     inView = physical; // no fold → model sees the full physical array
   }
