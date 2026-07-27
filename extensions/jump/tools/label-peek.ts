@@ -14,7 +14,7 @@ export function registerLabelPeek(pi: ExtensionAPI, state: GraphState): void {
     label: "Peek at a branch",
     description: `Read a bounded slice of the FOLDED content of a jump branch node WITHOUT jumping or changing the context projection. Use this when you want to glance at what a branch contains (e.g. to recover a forgotten detail or decide whether a jump is worth it) but do not want the cost of jumping there and back. Only jump nodes have foldable content; labels return their note. Read-only.`,
     promptSnippet:
-      "label_peek: read folded branch content without jumping. Prefer this over jump when you only need to glance.",
+      "label_peek: read a folded branch's content without jumping. Use it when, after a jump, your payload is missing a detail you folded away — cheaper than jumping to the branch and back.",
     parameters: Type.Object({
       id: Type.String({
         description: "The id of the jump branch node to peek at (from label_list).",
