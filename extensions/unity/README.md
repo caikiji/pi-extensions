@@ -1,6 +1,6 @@
 # unity — pi extension for Unity Editor integration
 
-让 pi (coding agent) 能方便地**读取 Unity 日志**、**操控运行中的 Unity Editor**、**执行 Unity 脚本**、**操作 Unity 项目文件**。
+让 pi (coding agent) 能方便地**读取 Unity 日志**、**操控运行中的 Unity Editor**、**操作 Unity 项目文件**。
 
 支持 Unity 2019.4 LTS 及之后所有版本(2020.3 / 2021.3 / 2022.3 / Unity 6)。
 
@@ -11,10 +11,9 @@
 Unity 开发者用 pi 时,agent 应该能:
 1. **看懂 Unity 在干什么** — 读 Editor.log / AssetImportWorker 日志,提取编译错误、导入错误、异常
 2. **操控运行中的 Unity** — 通过 PiBridge HTTP bridge 在已打开的 Editor 里执行命令(不用启动第二个实例)
-3. **让 Unity 干活(独立模式)** — Unity 没开时,通过 batchmode + `-executeMethod` 调用 Editor 脚本
-4. **安全操作项目文件** — 读写 YAML/JSON 文本资产,绝不破坏 GUID 引用
+3. **安全操作项目文件** — 读写 YAML/JSON 文本资产,绝不破坏 GUID 引用
 
-核心原则:**两种执行路径共存** — Unity 开着用 `unity_command`(快,驱动当前实例);Unity 没开用 `unity_run`(慢,新开 batchmode 进程)。
+核心原则:**单一执行路径** — 通过 PiBridge HTTP bridge 驱动**已打开的** Unity Editor 实例(不新开 batchmode 进程,避免冷启动与实例冲突)。
 
 ---
 
@@ -44,30 +43,6 @@ Unity 开发者用 pi 时,agent 应该能:
 - 模块前缀:`[Compiler]` `[AssetImport]` `[PackageManager]` `[Assembly Updater]` `[Burst]`
 - 时间戳:默认无,新版用 `-timestamps`,旧版用 `UNITY_EXT_LOGGING` 环境变量
 
-### batchmode 脚本执行
-- `-executeMethod NS.Class.Method`:方法必须 `static`、无参、无返回
-- 必须在 Editor assembly(文件夹名 `Editor` 或 asmdef 限定 `Editor` 平台)
-- `[MenuItem]` 特性**非必须**(菜单需要,但 `-executeMethod` 直接按全限定名调用)
-- 可用 API:`AssetDatabase` `EditorUtility` `SceneManager` `BuildPipeline` `EditorApplication`
-- 不可用:UI/渲染/`WaitForEndOfFrame`/依赖帧更新的系统
-- 传参:命令行参数,脚本内 `Environment.GetCommandLineArgs()` 读取
-- 返回错误:`throw` 异常 → 退出码 1;或 `EditorApplication.Exit(nonzero)`
-- `Debug.Log` 内容进 Editor.log
-
-### batchmode 坑(封装必须处理)
-1. **退出码不可靠**:Analytics 启用时编译错误也返回 0;upmPack 成功却返回 1 → 必须三重判定
-2. **`-nographics` 必须配 `-logFile <path>`**,否则日志被关闭
-3. **路径**:Windows `-projectPath` 不能以单反斜杠结尾(用 `\\` 或无尾斜杠);含空格必须引号
-4. **并发互斥**:`Temp/UnityLockfile` 独占锁,同项目不能开两个实例 → 封装层加文件锁
-5. **取消安全**:kill 进程后**必须清理 `Temp/UnityLockfile`**,否则下次启动报 "another Unity instance"
-6. **超时分层**:外部进程超时 > `-quitTimeout`(默认 300s,异步任务必加)
-7. **离线许可校验慢**:离线机器 5-6 分钟,CI 多阶段可达 18 分钟
-
-### Unity.exe 路径发现链
-1. `UNITY_EDITOR_PATH` 环境变量(直接覆盖)
-2. Unity Hub:`%APPDATA%\UnityHub\secondaryInstallPath.json` + 项目 `ProjectSettings/ProjectVersion.txt` 版本号
-3. 注册表兜底(仅旧版独立安装):`HKCU\SOFTWARE\Unity Technologies\Installer\Unity\Location x64`
-
 ### 可安全外部读写的文件
 - **YAML 文本**(启用 Force Text 序列化):`.unity` `.prefab` `.asset` `.mat` `.anim` `ProjectSettings/*.asset`
 - **JSON**:`.asmdef` `Packages/manifest.json`
@@ -87,7 +62,7 @@ Unity 开发者用 pi 时,agent 应该能:
 
 ```
 extensions/unity/
-├── index.ts                    # 入口,注册 6 个 tool
+├── index.ts                    # 入口,注册 5 个 tool
 ├── package.json                # pi 扩展声明
 ├── PiBridge/                   # C# HTTP bridge(装到项目 Assets/Editor/ 用)
 │   ├── PiBridge.cs             # 主类:HttpListener + 命令派发 + ExecuteCommand
@@ -96,18 +71,16 @@ extensions/unity/
 │   ├── Response.cs             # 响应结构
 │   └── SimpleJson.cs           # 极简 JSON 序列化/解析
 ├── lib/
-│   ├── paths.ts                # Unity.exe 发现(env→Hub→注册表)、日志路径定位、lockfile 检测
+│   ├── paths.ts                # 项目根探测、日志路径定位、lockfile 检测
 │   ├── project-version.ts      # 读 ProjectVersion.txt,版本比较
 │   ├── editor-log.ts           # 日志读取(项目级/全局回退,Windows 独占锁处理)
 │   ├── log-parser.ts           # 解析 CSxxxx 编译错误/异常/导入错误为结构化条目
-│   ├── batchmode.ts            # batchmode 封装(三重判定+文件锁+超时+取消清理+实时进度)
 │   ├── bridge-client.ts        # PiBridge HTTP 客户端(端口发现+版本校验+超时)
 │   └── tool-utils.ts           # 共享 helper(项目根探测)
 └── tools/
     ├── unity-log.ts            # tool: 读/解析 Unity 日志
     ├── unity-status.ts         # tool: 检测 Unity 运行/编译/导入状态
     ├── unity-project.ts        # tool: 读项目元信息(版本/asmdef/包)
-    ├── unity-run.ts            # tool: 执行 batchmode 脚本(独立模式)
     ├── unity-command.ts        # tool: 通过 PiBridge 操控运行中的 Editor
     └── unity-install-bridge.ts # tool: 自动安装 PiBridge.cs 到项目
 ```
@@ -177,51 +150,9 @@ extensions/unity/
 }
 ```
 
-### 2. `unity_run` — 执行 Unity 脚本(batchmode,独立模式)
-让 AI 让 Unity 干活(Unity 没开时用)。
+### 2. `unity_status` — 检测 Unity 状态
 
-**参数**:
-- `method: string` — 全限定名 `NS.Class.Method`
-- `projectPath?: string` — 默认 cwd
-- `args?: string[]` — 传给脚本的命令行参数(脚本内 `Environment.GetCommandLineArgs()` 读)
-- `timeout?: number` — 秒,默认 600
-- `extraArgs?: string[]` — 额外 Unity CLI 参数(如 `-buildTarget Android`)
-- `resultFile?: string` — 脚本写结果的 JSON 路径(约定 `Temp/pi-result.json`)
-
-**流程**(`batchmode.ts`):
-1. `paths.ts` 发现 Unity.exe(按版本)
-2. 对 projectPath 加文件锁(防并发)
-3. 检查 `Temp/UnityLockfile`,若存在且 Unity 在跑 → 报错(避免冲突)
-4. 构造命令:
-   ```
-   Unity.exe -batchmode -nographics -quit -quitTimeout <timeout>
-            -projectPath "<path>" -logFile "<temp-log>"
-            -executeMethod <method> [args...]
-   ```
-5. `pi.exec` 启动子进程,实时读 stdout/log 文件 → `onUpdate` 流式反馈
-6. 结束后**三重判定**:
-   - 退出码
-   - 日志里有无 `error CS`/`Exception:`
-   - `resultFile` 是否存在且合法 JSON
-7. 取消/超时:SIGTERM → 等 5s → kill → **清理 `Temp/UnityLockfile`**
-8. 返回:`{exitCode, success, durationMs, errors[], result?}`
-
-**返回示例**:
-```json
-{
-  "exitCode": 0,
-  "success": true,
-  "durationMs": 45230,
-  "logPath": "Temp/pi-unity-run.log",
-  "errors": [],
-  "result": { "builtAssets": 42, "outputPath": "Build/Android/" }
-}
-```
-
-### 3. `unity_status` — 检测 Unity 状态
-
-### 4. `unity_project` — 读项目元信息
-
+### 3. `unity_project` — 读项目元信息
 ---
 
 ## PiBridge 安装(启用 unity_command 的前提)
@@ -271,30 +202,6 @@ Unity Editor 失焦时,`EditorApplication.delayCall`/`update` 被节流到 ~1Hz(
 
 ---
 
-## 约定:batchmode 脚本结果回传
-
-为了让 AI 可靠拿到脚本执行结果,约定脚本写 JSON 到固定路径:
-
-```csharp
-// 用户的 Editor 脚本里
-[MenuItem("Tools/My Build")]
-public static void BuildMethod() {
-    try {
-        // ...干活...
-        var result = new { builtAssets = 42, outputPath = "Build/Android/" };
-        File.WriteAllText("Temp/pi-result.json", JsonUtility.ToJson(result, true));
-    } catch (Exception e) {
-        File.WriteAllText("Temp/pi-result.json",
-            JsonUtility.ToJson(new { error = e.Message, stack = e.StackTrace }, true));
-        EditorApplication.Exit(1);
-    }
-}
-```
-
-`unity_run` tool 会自动读 `Temp/pi-result.json` 并解析进返回值。扩展可提供一个 C# helper 包(后续)简化这个约定。
-
----
-
 ## 版本兼容策略
 
 | 版本 | 注意事项 |
@@ -304,15 +211,14 @@ public static void BuildMethod() {
 | 2022.3 LTS | 并行 `AssetImportWorker0/1.log` |
 | Unity 6 (6000.x) | 新增 `-useGlobalLog`、`-timestamps`;有 Project Auditor CLI(后续可集成) |
 
-`project-version.ts` 读 `ProjectSettings/ProjectVersion.txt` 拿版本号,日志路径与 batchmode 行为按版本分支处理。
+`project-version.ts` 读 `ProjectSettings/ProjectVersion.txt` 拿版本号,日志路径按版本分支处理。
 
 ---
 
 ## 实现状态
 
 1. ✅ **MVP(纯读取)**:`unity_log` + `unity_status` + `unity_project`
-2. ✅ **batchmode**:`unity_run`(文件锁/超时/取消清理/三重判定)
-3. ✅ **HTTP bridge**:`unity_command` + PiBridge.cs(操控运行中的 Editor)
-4. ✅ **自动安装**:`unity_install_bridge`(AI 给项目路径即可装 bridge)
-5. ✅ **失焦优化**:PiBridge v0.2.0 自动聚焦 + `config` 命令 + 版本校验
-6. ⏳ **后续**:C# 结果回传 helper 包、`/unity-doctor` 命令、Project Auditor 集成
+2. ✅ **HTTP bridge**:`unity_command` + PiBridge.cs(操控运行中的 Editor)
+3. ✅ **自动安装**:`unity_install_bridge`(AI 给项目路径即可装 bridge)
+4. ✅ **失焦优化**:PiBridge v0.2.0 自动聚焦 + `config` 命令 + 版本校验
+5. ⏳ **后续**:`/unity-doctor` 命令、Project Auditor 集成

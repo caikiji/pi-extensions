@@ -1,26 +1,14 @@
 /**
- * Unity.exe path discovery, project root detection, and log path resolution.
- *
- * Path discovery chain (per research):
- *   1. UNITY_EDITOR_PATH env var (direct override)
- *   2. Unity Hub: %APPDATA%\UnityHub\secondaryInstallPath.json + ProjectVersion.txt
- *   3. Registry fallback (legacy standalone installs, Windows only)
+ * Project root detection, Unity lockfile handling, and log path resolution.
  *
  * Log paths (2019.4 -> Unity 6 all default to project-level):
  *   - Project-level (default): <projectPath>/Logs/Editor.log
  *   - Global (only with -useGlobalLog): platform-specific
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { readProjectVersion } from "./project-version.ts";
-
-export interface UnityInstall {
-	path: string; // absolute path to Unity executable
-	version: string; // e.g. "2021.3.15f1"
-	source: "env" | "hub" | "registry" | "fallback";
-}
 
 export interface LogPaths {
 	editor: string; // <projectPath>/Logs/Editor.log
@@ -49,145 +37,6 @@ export function findProjectRoot(startPath: string): string | null {
 		dir = dirname(dir);
 	}
 }
-
-/**
- * Discover the Unity.exe path for a given project.
- *
- * Resolution order:
- *   1. UNITY_EDITOR_PATH env var
- *   2. Unity Hub secondary install path + project version from ProjectVersion.txt
- *   3. Windows registry (legacy standalone installs)
- *
- * Returns null if no install can be found.
- */
-export function discoverUnityInstall(projectPath: string): UnityInstall | null {
-	// 1. Environment override
-	const envPath = process.env.UNITY_EDITOR_PATH;
-	if (envPath && existsSync(envPath)) {
-		return {
-			path: envPath,
-			version: process.env.UNITY_EDITOR_VERSION ?? readProjectVersion(projectPath) ?? "unknown",
-			source: "env",
-		};
-	}
-
-	const projectVersion = readProjectVersion(projectPath);
-
-	// 2. Unity Hub
-	const hubInstall = discoverViaHub(projectVersion);
-	if (hubInstall) return hubInstall;
-
-	// 3. Registry (Windows only, legacy)
-	if (platform() === "win32") {
-		const regInstall = discoverViaRegistry(projectVersion);
-		if (regInstall) return regInstall;
-	}
-
-	return null;
-}
-
-/**
- * Discover Unity via Unity Hub.
- *
- * Hub stores install roots in:
- *   Windows: %APPDATA%\UnityHub\secondaryInstallPath.json
- *   macOS:   ~/Library/Application Support/UnityHub/secondaryInstallPath.json
- *   Linux:   ~/.config/UnityHub/secondaryInstallPath.json
- *
- * The file contains a JSON-encoded string of the default install root.
- * Each version lives in <root>/<version>/Editor/<Unity|Unity.exe>.
- */
-function discoverViaHub(projectVersion: string | null): UnityInstall | null {
-	const hubConfigPath = getHubConfigPath();
-	if (!hubConfigPath || !existsSync(hubConfigPath)) return null;
-
-	let installRoot: string;
-	try {
-		const raw = readFileSync(hubConfigPath, "utf-8").trim();
-		// secondaryInstallPath.json contains a JSON string (quoted), e.g. "D:\\Program Files\\Unity"
-		installRoot = JSON.parse(raw);
-		if (typeof installRoot !== "string" || !installRoot) return null;
-	} catch {
-		return null;
-	}
-
-	if (!existsSync(installRoot)) return null;
-
-	// The project version is required to locate the install; without it, we
-	// cannot pick a specific version directory.
-	if (!projectVersion) return null;
-
-	const exe = getUnityExecutablePath(installRoot, projectVersion);
-	if (exe && existsSync(exe)) {
-		return { path: exe, version: projectVersion, source: "hub" };
-	}
-
-	return null;
-}
-
-function getHubConfigPath(): string | null {
-	const home = homedir();
-	switch (platform()) {
-		case "win32": {
-			const appData = process.env.APPDATA ?? join(home, "AppData", "Roaming");
-			return join(appData, "UnityHub", "secondaryInstallPath.json");
-		}
-		case "darwin":
-			return join(home, "Library", "Application Support", "UnityHub", "secondaryInstallPath.json");
-		case "linux":
-			return join(home, ".config", "UnityHub", "secondaryInstallPath.json");
-		default:
-			return null;
-	}
-}
-
-/**
- * Build the Unity executable path for a given install root + version.
- *   Windows: <root>/<version>/Editor/Unity.exe
- *   macOS:   <root>/<version>/Unity.app/Contents/MacOS/Unity
- *   Linux:   <root>/<version>/Editor/Unity
- */
-function getUnityExecutablePath(installRoot: string, version: string): string | null {
-	const versionDir = join(installRoot, version);
-	switch (platform()) {
-		case "win32":
-			return join(versionDir, "Editor", "Unity.exe");
-		case "darwin":
-			return join(versionDir, "Unity.app", "Contents", "MacOS", "Unity");
-		case "linux":
-			return join(versionDir, "Editor", "Unity");
-		default:
-			return null;
-	}
-}
-
-/**
- * Discover Unity via Windows registry (legacy standalone installs).
- *
- * Key: HKCU\SOFTWARE\Unity Technologies\Installer\Unity
- * Value: "Location x64" = install dir containing Editor\Unity.exe
- *
- * Note: this only works for old standalone installs, not Hub-managed ones.
- */
-function discoverViaRegistry(projectVersion: string | null): UnityInstall | null {
-	// We avoid spawning reg.exe synchronously here for cross-platform safety.
-	// This is a best-effort: check the common default install location.
-	const defaultPaths = [
-		"C:\\Program Files\\Unity\\Hub\\Editor",
-		"C:\\Program Files\\Unity",
-	];
-	for (const base of defaultPaths) {
-		if (!existsSync(base)) continue;
-		if (projectVersion) {
-			const exe = getUnityExecutablePath(base, projectVersion);
-			if (exe && existsSync(exe)) {
-				return { path: exe, version: projectVersion, source: "registry" };
-			}
-		}
-	}
-	return null;
-}
-
 /**
  * Resolve all relevant log paths for a Unity project.
  *

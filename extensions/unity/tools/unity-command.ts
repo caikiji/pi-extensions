@@ -1,8 +1,7 @@
 /**
  * unity_command tool — execute a command in a RUNNING Unity Editor via PiBridge.
  *
- * Unlike unity_run (which launches a separate Unity process via batchmode and
- * can't touch an already-open project), this tool talks to a PiBridge HTTP
+ * Unlike launching a separate Unity process, this tool talks to a PiBridge HTTP
  * server running INSIDE the open Editor instance. No second Unity process,
  * no cold-start delay.
  *
