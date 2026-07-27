@@ -1,4 +1,4 @@
-# Roslyn Eval — 增强 PiBridge 的 `eval` 命令
+# Roslyn Eval + 其他增强方向 — PiBridge 能力补齐提案
 
 **Status:** 提案  
 **Date:** 2026-07-26  
@@ -197,4 +197,124 @@ Unity 有 `CompilationPipeline` 类可以触发域重载编译，但代价太大
 | 测试兼容性（2019.4 ~ Unity 6） | ~2h |
 | 更新 `unity_install_bridge` 部署 Roslyn | ~15 min |
 
-总计约 **半天** 可完成。
+---
+
+# 其他增强方向（与官方 CLI 的差距补齐）
+
+以下方向不限于 eval，是 PiBridge 整体能力对齐官方 CLI 可以做的事情。
+
+## 1. Play Mode 控制
+
+**当前：** `status` 只读 `isPlaying`，没有控制命令
+**官方：** pipeline 可以控制 Enter/Exit Play Mode
+
+**可以加的（~10 行 C#）：**
+```
+unity_command play --mode enter   # EditorApplication.EnterPlayMode()
+unity_command play --mode exit    # ExitPlayMode()
+unity_command play --mode pause   # isPaused = true
+```
+
+加上这个，Agent 就能自己跑 Play Mode 测试 → 看结果 → 修 bug → 再跑，全自动闭环。
+
+
+## 2. 命令发现机制（Agent 自省）
+
+**当前：** Agent 需要 README 里写死的命令列表
+**官方：** Agent 可以运行时查询可用命令
+
+**可以加的（~20 行 C#）：**
+```
+unity_command list-commands   # 返回所有命令 + 参数签名 + 描述
+```
+Agent 不用靠 prompt 记住，运行时问就行。
+
+
+## 3. 自定义命令注册（对标 `[CliCommand]`）
+
+**当前：** 命令写死在 `switch` 里，用户不能扩展
+**官方：** 用 `[CliCommand]` 特性标记任意静态方法，Agent 自动发现
+
+**可以加的：**
+```csharp
+// 用户在项目自己的 Editor 脚本里写：
+[PiCommand("count-scenes", "Count scenes in build settings")]
+public static string CountScenes()
+{
+    return $"Scenes in build: {EditorBuildSettings.scenes.Length}";
+}
+```
+Agent 通过 `unity_command list-custom` 发现，通过 `unity_command run-custom count-scenes` 调用。
+这样用户项目的工具方法直接暴露给 Agent，不用改 PiBridge 源码。
+
+
+## 4. MCP 包装（让其他 Agent 也能用 PiBridge）
+
+**当前：** 只能在 pi 里用
+**官方：** 内置 MCP 支持，Claude Code / Codex / Cursor 都能用
+
+**可以加的：** 在扩展入口旁加一个 MCP server（基于 `@modelcontextprotocol/sdk`），
+把 PiBridge 的 5 个 tool 暴露为 MCP tools。其他 Agent 配置一行就能用。
+
+
+## 5. 纯文件操作工具（不依赖 Editor）
+
+**当前：** `unity_project` 已经读文件，但还可以扩展写操作
+**官方：** 文件级别的操作不依赖 bridge
+
+**可以加的（Agent 直接改文件，Editor 未启动也能用）：**
+
+| 工具 | 说明 |
+|------|------|
+| `unity_edit_project_settings` | 改 `ProjectSettings.asset` 字段（Company Name、scripting backend 等） |
+| `unity_edit_manifest` | 增删 `Packages/manifest.json` 的包依赖 |
+| `unity_switch_platform` | 改 BuildTarget（改 `ProjectSettings.asset` 里的字段） |
+
+这些在 Unity 未启动时也能用，对 CI 和初始项目配置很有价值。
+
+
+## 6. 多实例支持
+
+**当前：** `discoverBridge` 按端口顺序探测，找到第一个就返回
+**官方：** 可以管理多个 Editor 实例
+
+**可以加的：**
+- `unity_command` 支持按 `projectPath` 精确匹配实例（端口文件已写项目路径）
+- 新增 `unity_list_instances` 返回所有运行中的 PiBridge 实例列表
+
+
+## 7. Workflow 编排
+
+**当前：** Agent 需要自己组合多次 `unity_command` 调用
+**官方：** pipeline 提供流程化控制
+
+**可以加的（`bridge-client.ts` 里已有 `waitForCondition`，可再封装一步）：**
+```
+unity_command run-workflow '{
+  "steps": [
+    {"command": "compile"},
+    {"command": "status", "pollUntil": "isCompiling", "waitFor": false},
+    {"command": "play", "args": {"mode": "enter"}},
+    {"command": "eval", "code": "Debug.Log(...)"},
+    {"command": "play", "args": {"mode": "exit"}}
+  ]
+}'
+```
+一次调用完成完整工作流，减少 Agent 的 round-trip。
+
+
+---
+
+## 优先级建议
+
+| 优先级 | 方向 | 工作量 | 收益 |
+|--------|------|--------|------|
+| 🔴 P0 | Play Mode 控制 | ~10 行 C# | Agent 能自测闭环 |
+| 🔴 P0 | 命令发现 `list-commands` | ~20 行 C# | 减少 prompt 维护 |
+| 🟡 P1 | 自定义 `[PiCommand]` 特性 | ~2h | 用户可扩展 |
+| 🟡 P1 | 纯文件操作工具 | ~1h/个 | 不依赖 Editor |
+| 🟢 P2 | MCP 包装 | ~2h | 其他 Agent 可用 |
+| 🟢 P2 | 多实例支持 | ~1h | 更鲁棒 |
+| ⚪ P3 | Workflow 编排 | ~3h | 高级自动化 |
+
+Play Mode 控制 + 命令发现这两个**半天就能加上**，Agent 体验提升最明显。
