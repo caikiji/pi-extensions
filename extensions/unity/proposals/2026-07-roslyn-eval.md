@@ -50,19 +50,21 @@ Agent → POST /eval { code: "..." }
 
 | Unity 版本 | Roslyn 支持 | 备注 |
 |-----------|------------|------|
-| 2019.4 LTS | ✅ v3.11.0 可用 | API 兼容级别需 .NET 4.x |
-| 2020.3 LTS | ✅ | 同左 |
-| 2021.3 LTS | ✅ | 同左 |
-| 2022.3 LTS | ✅ | 同左 |
-| Unity 6 | ✅ | 同左 |
+| Unity 版本 | Roslyn 版本 | C# 支持 | 备注 |
+|-----------|------------|--------|------|
+| 2019.4 LTS | **3.11.0** | C# 7.3 | API 兼容级别需 .NET 4.x |
+| 2020.3 LTS | **3.11.0** | C# 8.0 | 同左，建议降级到 C# 7.3 语法 |
+| 2021.3 LTS | **4.0.1** | C# 9.0 | record、init、pattern matching 可用 |
+| 2022.3 LTS | **4.0.1** | C# 9.0 | 同上 |
+| Unity 6 | **4.8.0** | C# 10+ | 完整现代 C# 支持 |
 
 ---
 
 ## 实现要点
 
-### 1. DLL 部署
+### 1. DLL 部署（按版本选择）
 
-在 PiBridge 源码目录下新增 `Roslyn/` 子目录，存放所需 DLL。`unity_install_bridge` 会一并复制。
+在 PiBridge 源码目录下新增 `Roslyn/` 子目录，按 Unity 版本存放不同的 Roslyn 版本：
 
 ```
 PiBridge/
@@ -71,15 +73,37 @@ PiBridge/
 ├── WindowFocus.cs
 ├── Response.cs
 ├── SimpleJson.cs
-└── Roslyn/               # 新增
-    ├── Microsoft.CodeAnalysis.dll
-    ├── Microsoft.CodeAnalysis.CSharp.dll
-    ├── Microsoft.CodeAnalysis.CSharp.Scripting.dll
-    ├── Microsoft.CodeAnalysis.Scripting.dll
-    ├── System.Collections.Immutable.dll
-    ├── System.Reflection.Metadata.dll
-    ├── System.Threading.Tasks.Extensions.dll
-    └── ...
+└── Roslyn/
+    ├── v3.11.0/           # Unity 2019.4 / 2020.3  (C# 7.3/8.0)
+    │   ├── Microsoft.CodeAnalysis.dll
+    │   ├── Microsoft.CodeAnalysis.CSharp.dll
+    │   ├── Microsoft.CodeAnalysis.CSharp.Scripting.dll
+    │   ├── Microsoft.CodeAnalysis.Scripting.dll
+    │   └── ...
+    ├── v4.0.1/            # Unity 2021.3 / 2022.3  (C# 9.0)
+    │   └── ...
+    └── v4.8.0/            # Unity 6+  (C# 10+)
+        └── ...
+```
+
+`unity_install_bridge` 在安装时调用 `readProjectVersion` 判断 Unity 版本，
+复制对应版本的 Roslyn DLL 到项目中。
+
+```csharp
+// unity_install_bridge 时的版本选择逻辑（伪代码）
+string unityVersion = ReadProjectVersion(projectPath);
+string roslynDir = unityVersion switch {
+    var v when v.StartsWith("2019") || v.StartsWith("2020") => "Roslyn/v3.11.0",
+    var v when v.StartsWith("2021") || v.StartsWith("2022") => "Roslyn/v4.0.1",
+    _ => "Roslyn/v4.8.0"  // Unity 6+
+};
+CopyDirectory(roslynDir, targetPath);
+```
+
+**安全回退：** 如果 Roslyn 加载失败（DLL 版本不兼容或缺少依赖），
+```
+PiBridge 自动退回到现有的反射 EvalExpression 逻辑
+确保低版本 Unity 用户不丢失 eval 能力。
 ```
 
 ### 2. PiBridge.cs eval case 替换
