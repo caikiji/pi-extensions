@@ -11,7 +11,7 @@ export function registerLabel(pi: ExtensionAPI, state: GraphState): void {
   pi.registerTool({
     name: "label",
     label: "Label",
-    description: `Mark the current point in the conversation as a navigable graph node. Returns a stable \`id\` you can later jump back to with the \`jump\` tool. Use this right before starting work whose intermediate steps you do NOT need to keep in context, so you can collapse it later. The label itself stays in context permanently as a cache-stable anchor. IMPORTANT: the \`note\` is not optional decoration — it is the anchor's purpose. After a jump, the work between this label and the jump is folded out of view; your \`note\` here and your \`payload\` in the later jump are the two ends of the thread that let you reconstruct what happened. Write the note as: WHY you are placing this label now + WHAT you plan to do next. A vague note like 'checkpoint' leaves you unable to explain the gap after a jump. Use \`label_list\` to see all existing anchors.`,
+    description: `Use before starting a long exploratory sub-task whose intermediate steps you won't need afterward (large searches, multi-file reads, trial-and-error). Creates a stable \`id\` you later \`jump\` back to, folding away everything added in between. The label stays in context permanently as a re-entry point; the \`note\` is the plan-end that a later jump's \`payload\` contrasts against.`,
     promptSnippet: COMMON_ANTI_PATTERN_SNIPPET,
     promptGuidelines: LABEL_GUIDELINES,
     parameters: Type.Object({
