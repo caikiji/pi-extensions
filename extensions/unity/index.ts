@@ -370,6 +370,9 @@ function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 	lines.push(`Installed PiBridge v${result.version}`);
 	lines.push("");
 	lines.push(`Path: ${result.installedPath} (${result.installedFiles.length} file${result.installedFiles.length === 1 ? "" : "s"})`);
+	if (result.migratedFiles > 0) {
+		lines.push(`Migrated ${result.migratedFiles} stale flat-layout file(s) from Assets/Editor/ → Assets/Editor/PiBridge/`);
+	}
 	for (const f of result.installedFiles) {
 		lines.push(`  • ${f.replace(/\\/g, "/")}`);
 	}
