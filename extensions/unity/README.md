@@ -129,10 +129,10 @@ extensions/unity/
 - `since?: string` — ISO 时间戳,只看之后的内容
 
 **流程**:
-1. `paths.ts` 定位日志(项目级优先,全局回退)
-2. 读文件(Windows 下用 share-read 绕过独占锁)
-3. `log-parser.ts` 按 filter 提取,结构化为 `{severity, file, line, col, code, message, stack?}[]`
-4. 返回 JSON + 可读文本
+1. **Editor console**:PiBridge 在线时优先走 bridge `/log`（返回结构化条目，含 info 级 `Debug.Log`，不受 Editor.log 解析/格式限制）；离线时回退到读 `Editor.log` 文件（项目级优先，全局回退，Windows share-read 绕过独占锁）
+2. `log-parser.ts` / bridge mapper 按 filter 提取,结构化为 `{severity, file, line, col, code, message, stack?}[]`
+3. **import / package / player** kind 始终读文件（bridge 无对应端点）
+4. 返回 JSON + 可读文本;`sources[].source` 标明每条来自 `bridge` / `project` / `global`
 
 **返回示例**:
 ```json
@@ -151,6 +151,13 @@ extensions/unity/
 ```
 
 ### 2. `unity_status` — 检测 Unity 状态
+
+**参数**:`projectPath?: string`（默认 cwd）
+
+**流程**:
+1. 读 `Temp/UnityLockfile` 判 `isRunning`（存在 + Windows 文件锁探测）
+2. Compiling/Importing **优先用 bridge `/status`** 的 `EditorApplication.isCompiling` / `isUpdating`（权威值）；bridge 离线才回退到 Editor.log 尾 200 行关键词启发式（可能假阳性）
+3. 返回 `statusSource: "bridge" | "heuristic" | "none"` 标明 Compiling/Importing 来源,便于判断可信度
 
 ### 3. `unity_project` — 读项目元信息
 ---
