@@ -70,35 +70,46 @@ export default function jump(pi: ExtensionAPI) {
     // generation) can read folded content. Best-effort; tools degrade if null.
     state.lastMessages = event.messages;
 
-    if (state.resolveAnchors(event.messages)) {
-      state.persist(pi); // best-effort anchor persistence
-    }
+    // Fault isolation: a projection error must NEVER break the LLM call. On any
+    // failure we degrade to passthrough (full physical context, no fold) and
+    // leave state for the next turn to retry.
+    try {
+      // Resolve/validate every anchorIndex BEFORE project() so project sees
+      // correct indices. resolveAnchors also re-resolves stale indices left by
+      // compaction (compaction is additionally invalidated eagerly in the
+      // session_compact handler below).
+      state.resolveAnchors(event.messages);
 
-    const projected = project(state, event.messages);
+      const projected = project(state, event.messages);
 
-    // Compute the in-view token estimate ONLY when a jump is actively folding.
-    // Rationale: pi's getContextUsage().tokens already gives an accurate
-    // physical count (it uses real provider usage + trailing chars/4 estimate).
-    // We can't replicate that without internal APIs, so when there's NO fold
-    // we leave lastFoldedEstimate=null (buildContextReport then reports
-    // in-view == physical). When a fold IS active, physical counts the full
-    // array but the model only sees the projected (folded) array — so we
-    // estimate JUST the folded region with chars/4 and subtract from physical.
-    // This keeps the error bounded to the small folded region instead of the
-    // whole array.
-    if (state.activeJumpId) {
-      const jumpNode = state.nodes.get(state.activeJumpId);
-      const target = jumpNode?.jumpedFrom ? state.nodes.get(jumpNode.jumpedFrom) : undefined;
-      if (jumpNode && target && target.anchorIndex >= 0 && jumpNode.anchorIndex >= 0) {
-        const folded = event.messages.slice(target.anchorIndex + 1, jumpNode.anchorIndex);
-        state.lastFoldedEstimate = estimateArrayTokens(folded);
+      // Compute the in-view token estimate ONLY when a jump is actively folding.
+      // Rationale: pi's getContextUsage().tokens already gives an accurate
+      // physical count (it uses real provider usage + trailing chars/4 estimate).
+      // We can't replicate that without internal APIs, so when there's NO fold
+      // we leave lastFoldedEstimate=null (buildContextReport then reports
+      // in-view == physical). When a fold IS active, physical counts the full
+      // array but the model only sees the projected (folded) array — so we
+      // estimate JUST the folded region with chars/4 and subtract from physical.
+      // This keeps the error bounded to the small folded region instead of the
+      // whole array.
+      if (state.activeJumpId) {
+        const jumpNode = state.nodes.get(state.activeJumpId);
+        const target = jumpNode?.jumpedFrom ? state.nodes.get(jumpNode.jumpedFrom) : undefined;
+        if (jumpNode && target && target.anchorIndex >= 0 && jumpNode.anchorIndex >= 0) {
+          const folded = event.messages.slice(target.anchorIndex + 1, jumpNode.anchorIndex);
+          state.lastFoldedEstimate = estimateArrayTokens(folded);
+        } else {
+          state.lastFoldedEstimate = null;
+        }
       } else {
         state.lastFoldedEstimate = null;
       }
-    } else {
+      return { messages: projected };
+    } catch {
+      // Degraded path: never let a projection error reach the provider.
       state.lastFoldedEstimate = null;
+      return { messages: event.messages };
     }
-    return { messages: projected };
   });
 
   // Auto-clear the active jump once the agent has settled (no more automatic
@@ -118,7 +129,9 @@ export default function jump(pi: ExtensionAPI) {
       // target (anchorIndex<0, projection passthrough) still report a
       // bogus in-view<physical, falsely implying a fold took effect.
       state.lastFoldedEstimate = null;
-      state.persist(pi);
+      // NOTE: no persist here — activeJumpId is always persisted null and
+      // nodes don't change on settle, so persisting was a no-op that only
+      // bloated the session file. (M3.)
     }
   });
 
@@ -130,7 +143,7 @@ export default function jump(pi: ExtensionAPI) {
   // granular signal; either way, summing per-occurrence matches pi's own
   // session-stats aggregation.)
   pi.on("tool_result", async (event) => {
-    state.accumulateUsage(event.usage);
+    state.accumulateUsage(event.toolCallId, event.usage);
   });
 
   // Compaction policy (fixed): do NOT unconditionally cancel.
@@ -148,10 +161,29 @@ export default function jump(pi: ExtensionAPI) {
   //
   // We intentionally return void (no cancel) so pi proceeds normally.
 
+  // After compaction rewrites the physical message array, every node's
+  // anchorIndex is stale. Mark them all -1 here so the next `context` event
+  // re-resolves by toolCallId. (resolveAnchors also re-validates indices, so
+  // this eager reset is fast-path determinism, not the only safety net.) We
+  // never cancel compaction — see the policy note above.
+  pi.on("session_compact", async () => {
+    try {
+      state.invalidateAnchors();
+    } catch {
+      /* best-effort; resolveAnchors re-validates next turn anyway */
+    }
+  });
+
   // Restore state on (re)start / resume / fork.
   pi.on("session_start", async (_event, ctx) => {
-    // getBranch() = path from root to current leaf.
-    state.reset(ctx.sessionManager.getBranch() as { type: string; customType?: string; data?: unknown }[]);
+    // getBranch() = path from root to current leaf. Fault-isolated: if restore
+    // fails (getBranch threw, or persisted data was malformed), fall back to a
+    // clean slate with no persisted nodes so the extension keeps working.
+    try {
+      state.reset(ctx.sessionManager.getBranch() as { type: string; customType?: string; data?: unknown }[]);
+    } catch {
+      state.reset([]);
+    }
   });
 
   // ---- tools ----

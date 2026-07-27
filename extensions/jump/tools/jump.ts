@@ -6,9 +6,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { GraphState } from "../lib/state.ts";
 import { COMMON_ANTI_PATTERN_SNIPPET, JUMP_GUIDELINES } from "../lib/guidance.ts";
-import { buildPreview } from "../lib/content.ts";
+import { buildPreview, capText } from "../lib/content.ts";
 import { synthesizeJumpResultText } from "../lib/projection.ts";
-import type { GraphNode } from "../lib/types.ts";
+import { PAYLOAD_MAX, type GraphNode } from "../lib/types.ts";
 
 export function registerJump(pi: ExtensionAPI, state: GraphState): void {
   pi.registerTool({
@@ -87,7 +87,7 @@ export function registerJump(pi: ExtensionAPI, state: GraphState): void {
         id: toolCallId,
         kind: "jump",
         anchorIndex: -1, // resolved lazily on next projection
-        note: params.payload,
+        note: params.payload ? capText(params.payload, PAYLOAD_MAX) : params.payload,
         jumpedFrom: params.targetId,
         preview: preview || undefined,
         foldedCount: foldedCount > 0 ? foldedCount : undefined,

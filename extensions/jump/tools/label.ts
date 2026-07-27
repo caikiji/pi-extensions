@@ -5,7 +5,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { GraphState } from "../lib/state.ts";
 import { COMMON_ANTI_PATTERN_SNIPPET, LABEL_GUIDELINES } from "../lib/guidance.ts";
-import type { GraphNode } from "../lib/types.ts";
+import { PAYLOAD_MAX, type GraphNode } from "../lib/types.ts";
+import { capText } from "../lib/content.ts";
 
 export function registerLabel(pi: ExtensionAPI, state: GraphState): void {
   pi.registerTool({
@@ -26,11 +27,12 @@ export function registerLabel(pi: ExtensionAPI, state: GraphState): void {
       // The label node is anchored to this very tool's result message, which
       // will be appended right after this execute() returns. We record the
       // id now and resolve the anchor index lazily on first projection.
+      const note = params.note ? capText(params.note, PAYLOAD_MAX) : params.note;
       const node: GraphNode = {
         id: toolCallId,
         kind: "label",
         anchorIndex: -1, // resolved lazily
-        note: params.note,
+        note,
         createdAt: Date.now(),
       };
       state.nodes.set(toolCallId, node);
@@ -44,11 +46,11 @@ export function registerLabel(pi: ExtensionAPI, state: GraphState): void {
             text:
               "Label created.\nid: " +
               toolCallId +
-              (params.note ? "\nnote: " + params.note : "") +
+              (note ? "\nnote: " + note : "") +
               "\nUse `jump` with this id to return here and pop everything added since.",
           },
         ],
-        details: { id: toolCallId, note: params.note },
+        details: { id: toolCallId, note },
       };
     },
   });
