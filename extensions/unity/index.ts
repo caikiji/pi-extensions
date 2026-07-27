@@ -274,7 +274,7 @@ function formatUnityStatusResult(result: UnityStatusResult): string {
 
 	if (result.isRunning) {
 		lines.push("");
-		lines.push("⚠ Unity is running. Do not launch another Unity instance for this project — it will fail with 'another Unity instance'.");
+		lines.push("⚠ Unity is running. Do not launch a second instance for this project — it will fail with 'another Unity instance'.");
 	}
 
 	return lines.join("\n");
