@@ -5,7 +5,7 @@
  *   - Read Unity logs (compile errors, exceptions, import errors)
  *   - Detect Unity running/compiling/importing state
  *   - Read project metadata (version, assemblies, packages)
- *   - Execute Unity Editor scripts via batchmode (with safe result verification)
+ *   - Drive a running Unity Editor via an in-Editor HTTP bridge (PiBridge)
  *
  * Supports Unity 2019.4 LTS and later (2020.3 / 2021.3 / 2022.3 / Unity 6).
  *
@@ -14,12 +14,10 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { runBatchmode } from "./lib/batchmode.ts";
 import { runUnityCommand, unityCommandParams, type UnityCommandResult } from "./tools/unity-command.ts";
 import { runUnityInstallBridge, unityInstallBridgeParams, type UnityInstallBridgeResult } from "./tools/unity-install-bridge.ts";
 import { runUnityLog, unityLogParams, type UnityLogResult } from "./tools/unity-log.ts";
 import { runUnityProject, unityProjectParams, type UnityProjectResult } from "./tools/unity-project.ts";
-import { runUnityRun, unityRunParams, type UnityRunResult } from "./tools/unity-run.ts";
 import { runUnityStatus, unityStatusParams, type UnityStatusResult } from "./tools/unity-status.ts";
 
 export default function (pi: ExtensionAPI) {
@@ -72,7 +70,7 @@ export default function (pi: ExtensionAPI) {
 			"Also returns the project's Unity version. Uses Temp/UnityLockfile to detect a running instance.",
 		promptSnippet: "Check if Unity is running/compiling/importing",
 		promptGuidelines: [
-			"Use unity_status before starting a long Unity operation or batchmode run to avoid conflicts with an already-running Editor instance.",
+		"Use unity_status before starting a long Unity operation to avoid conflicts with an already-running Editor instance.",
 		],
 		parameters: unityStatusParams,
 
@@ -125,48 +123,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── unity_run ──────────────────────────────────────────────────────────
-	pi.registerTool({
-		name: "unity_run",
-		label: "Unity Run",
-		description:
-			"Execute a static Unity Editor method via batchmode (`Unity.exe -batchmode -executeMethod`). " +
-			"The method must be static, parameterless, and in an Editor assembly. " +
-			"Results are triple-verified (exit code + log errors + optional result JSON file) because Unity exit codes are unreliable. " +
-			"The script can write results to Temp/pi-result.json (or a custom resultFile) and the tool returns the parsed JSON. " +
-			"WARNING: This launches Unity, which is slow (30s+ cold start). Use only for tasks that require the Unity API (AssetDatabase, BuildPipeline, etc.).",
-		promptSnippet: "Run a Unity Editor script via batchmode (slow, launches Unity)",
-		promptGuidelines: [
-			"Use unity_run only when you need the Unity Editor API (AssetDatabase, BuildPipeline, SceneManager). For reading files, prefer read/grep/bash instead of launching Unity.",
-			"Before calling unity_run, check unity_status to ensure Unity isn't already running — concurrent instances on the same project will fail.",
-			"unity_run scripts should write results to Temp/pi-result.json via File.WriteAllText for reliable structured output, since Unity exit codes are unreliable.",
-		],
-		parameters: unityRunParams,
-
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const result = await runUnityRun(params, ctx.cwd, onUpdate, signal);
-			return {
-				content: [{ type: "text", text: formatUnityRunResult(result) }],
-				details: result,
-			};
-		},
-
-		renderResult(result, _options, theme) {
-			const details = result.details as UnityRunResult | undefined;
-			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
-			const status = details.success
-				? theme.fg("success", "✓ success")
-				: details.timedOut
-					? theme.fg("error", "✗ timeout")
-					: details.cancelled
-						? theme.fg("warning", "✗ cancelled")
-						: theme.fg("error", "✗ failed");
-			const duration = `${(details.durationMs / 1000).toFixed(1)}s`;
-			const errorCount = details.errors.length;
-			const errors = errorCount > 0 ? theme.fg("error", ` ${errorCount} err`) : "";
-			return new Text(`${status} ${theme.fg("dim", duration)}${errors}`, 0, 0);
-		},
-	});
 	// ─── unity_command ───────────────────────────────────────────────────────
 	// Talks to a PiBridge HTTP server running INSIDE an already-open Unity
 	// Editor instance. Avoids launching a second Unity process. Requires
@@ -180,10 +136,10 @@ export default function (pi: ExtensionAPI) {
 			"Commands: ping (health check), refresh (AssetDatabase.Refresh), compile (trigger recompile), " +
 			"status (isCompiling/isPlaying/isUpdating), run-menu (execute a menu item — RISKY: can open a modal dialog that freezes Unity's main thread and makes the bridge unresponsive; 15s timeout, refuses if a dialog is already open), asset-info (load asset metadata), " +
 			"log (read recent Console entries), eval (call a static method, needs PI_BRIDGE_ALLOW_EVAL=1). " +
-			"Unlike unity_run, this does NOT launch a new Unity process — it drives the already-open Editor.",
+			"This does NOT launch a new Unity process — it drives the already-open Editor via HTTP.",
 		promptSnippet: "Run a command in the open Unity Editor via PiBridge HTTP bridge",
 		promptGuidelines: [
-			"Use unity_command (not unity_run) when Unity is already open for the project — it drives the running instance via HTTP, avoiding a 30s+ cold start.",
+			"Use unity_command when Unity is already open for the project — it drives the running instance via HTTP.",
 			"Before unity_command, the PiBridge.cs file must be in Assets/Editor/. If unity_command reports 'PiBridge is not running', use unity_install_bridge to install it, then tell the user to focus Unity so it recompiles.",
 			"After unity_command with 'compile' or 'refresh', poll unity_command status (or unity_status) until isCompiling becomes false — the Editor throttles when unfocused, so completion is not instant.",
 			"unity_command run-menu is risky: ExecuteMenuItem is blocking and can open a modal dialog that freezes Unity's main thread, making the bridge unresponsive. Prefer dedicated commands (refresh/compile/status) over run-menu. If run-menu times out, tell the user a dialog may be open in Unity and they should close it, then verify with ping.",
@@ -318,7 +274,7 @@ function formatUnityStatusResult(result: UnityStatusResult): string {
 
 	if (result.isRunning) {
 		lines.push("");
-		lines.push("⚠ Unity is running. Do not start batchmode — it will fail with 'another Unity instance'.");
+		lines.push("⚠ Unity is running. Do not launch another Unity instance for this project — it will fail with 'another Unity instance'.");
 	}
 
 	return lines.join("\n");
@@ -353,47 +309,6 @@ function formatUnityProjectResult(result: UnityProjectResult): string {
 	return lines.join("\n");
 }
 
-function formatUnityRunResult(result: UnityRunResult): string {
-	const lines: string[] = [];
-	lines.push(`Unity Run — ${result.method} (${(result.durationMs / 1000).toFixed(1)}s)`);
-	lines.push("");
-
-	if (result.timedOut) {
-		lines.push(`✗ TIMED OUT after ${result.durationMs / 1000}s`);
-	} else if (result.cancelled) {
-		lines.push("✗ CANCELLED");
-	} else if (result.success) {
-		lines.push(`✓ SUCCESS (exit code ${result.exitCode})`);
-	} else {
-		lines.push(`✗ FAILED (exit code ${result.exitCode})`);
-	}
-
-	lines.push(`Unity: ${result.unityPath}`);
-	lines.push(`Log: ${result.logPath}`);
-
-	if (result.errors.length > 0) {
-		lines.push("");
-		lines.push(`Errors (${result.errors.length}):`);
-		for (const err of result.errors.slice(0, 20)) {
-			const loc = err.file ? ` ${err.file}${err.line ? `(${err.line})` : ""}` : "";
-			lines.push(`  [${err.severity}]${loc} ${err.message}`);
-		}
-		if (result.errors.length > 20) {
-			lines.push(`  ... ${result.errors.length - 20} more`);
-		}
-	}
-
-	if (result.result !== null) {
-		lines.push("");
-		lines.push("Result JSON:");
-		lines.push(JSON.stringify(result.result, null, 2));
-	} else if (result.resultPath) {
-		lines.push("");
-		lines.push(`Result file existed but was not valid JSON: ${result.resultPath}`);
-	}
-
-	return lines.join("\n");
-}
 
 function formatUnityCommandResult(result: UnityCommandResult): string {
 	const lines: string[] = [];
