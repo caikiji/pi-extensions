@@ -11,7 +11,7 @@ export function registerLabelList(pi: ExtensionAPI, state: GraphState): void {
   pi.registerTool({
     name: "label_list",
     label: "List anchors",
-    description: `List all jump anchors (labels and jump branch nodes) you can currently jump to, PLUS a context-metrics block (window / physical / in-view tokens, cumulative ↑↓R CH) so you can gauge how much context room you have. Returns each node's id, kind (label/jump), its note or carried payload, creation order, and — for jump nodes — a short preview of the folded content and how many messages were folded. Use this whenever you've lost track of which anchors exist, what a branch contains, OR how full your context is. Read-only: does NOT change the context projection.`,
+    description: `Returns all jump anchors (labels + jump branch nodes) you can currently jump to, plus a context-metrics block (window / physical / in-view tokens, cumulative ↑↓R CH). Each entry shows id, kind, its note or payload, age, and — for jump nodes — a short preview of the folded content and how many messages were folded. Read-only; does not change the context projection.`,
     promptSnippet:
       "label_list: enumerate jump anchors + show context metrics (window/physical/in-view tokens). Call BEFORE jump to get a valid id; call when unsure what anchors exist or how full your context is.",
     parameters: Type.Object({}),

@@ -14,7 +14,7 @@ export function registerJump(pi: ExtensionAPI, state: GraphState): void {
   pi.registerTool({
     name: "jump",
     label: "Jump",
-    description: `Jump the context back to a previously created label/jump node (its \`id\`), popping everything after it from the LLM view and replacing it with your carried \`payload\`. ALWAYS auto-labels the current point first and injects the new branch \`id\` into the payload, so the point you jumped FROM becomes a node you can re-visit. Call this only as the final action of a sub-task (do not call other tools in the same turn). The \`payload\` is your ONLY memory of the folded work, so it must contrast with the target label's \`note\` (the plan). Write what you actually did AND how it differs from the plan: what you completed as planned, what you did NOT do, and anything NEW you did beyond the plan. Without the diff, the post-jump you will wrongly assume everything went as planned. NOTE: a jump folds the context for exactly ONE LLM turn; after that turn the full context returns. To re-fold, jump again. Use \`label_list\` to discover valid target ids, and \`label_peek\` to glance at a folded branch without jumping.`,
+    description: `Use when a sub-task is done and you want to return to an earlier \`label\`, folding the work in between out of view. Pops everything after the target from the LLM view and injects your carried \`payload\` in its place. Auto-labels the point you jumped FROM as a new branch \`id\` (re-visit it later to recover the folded work). The fold lasts exactly one LLM turn, then the full context auto-restores.`,
     promptSnippet: COMMON_ANTI_PATTERN_SNIPPET,
     promptGuidelines: JUMP_GUIDELINES,
     parameters: Type.Object({
