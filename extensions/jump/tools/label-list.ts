@@ -54,11 +54,6 @@ export function registerLabelList(pi: ExtensionAPI, state: GraphState): void {
           }
         }
       }
-      lines.push("");
-      lines.push(
-        "Jump to any id above with `jump`. To glance at a jump's folded content without jumping, use `label_peek <id>`.",
-      );
-
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
