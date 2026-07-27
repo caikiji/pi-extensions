@@ -6,18 +6,12 @@
  * subfolder so they stay together and don't collide with the user's own
  * Editor scripts. Creates Assets/Editor/PiBridge/ if missing.
  *
- * Also migrates any previous flat-layout install (older versions copied these
- * .cs directly into Assets/Editor/); left in place, those would duplicate the
- * subfolder copies and break compilation. Only files that are actually ours
- * (declare `namespace PiBridge`) are removed, so user scripts with a
- * coincidentally-matching name are never touched.
- *
  * This lets the AI set up the bridge for any Unity project on demand — the
  * user just provides the project directory and the agent handles the rest.
  * After install, Unity auto-compiles on focus and the bridge starts, after
  * which unity_command becomes usable.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 
@@ -36,8 +30,6 @@ export interface UnityInstallBridgeResult {
 	projectPath: string;
 	installedPath: string;
 	installedFiles: string[];
-	/** Stale flat-layout copies removed during this install (0 unless upgrading from an older version). */
-	migratedFiles: number;
 	version: string;
 	nextSteps: string[];
 }
@@ -99,39 +91,11 @@ export async function runUnityInstallBridge(
 		installedFiles.push(targetPath);
 	}
 
-	// 5. Migrate any previous flat-layout install: older versions copied these
-	//    .cs directly into Assets/Editor/. Left in place, they'd duplicate the
-	//    subfolder copies (CS0101 duplicate definition). Remove only files that
-	//    are actually ours (declare `namespace PiBridge`); this never touches a
-	//    user script that merely shares a filename.
-	let migratedFiles = 0;
-	if (existsSync(editorDir)) {
-		for (const entry of readdirSync(editorDir)) {
-			if (!entry.endsWith(".cs")) continue;
-			const flatPath = join(editorDir, entry);
-			let content: string;
-			try {
-				content = readFileSync(flatPath, "utf-8");
-			} catch {
-				continue; // directory or unreadable — skip
-			}
-			if (content.includes("namespace PiBridge")) {
-				try {
-					unlinkSync(flatPath);
-					migratedFiles++;
-				} catch {
-					// best-effort; a locked file will surface as a Unity compile error
-				}
-			}
-		}
-	}
-
-	// 6. Return result with next steps for the AI/user
+	// 5. Return result with next steps for the AI/user
 	return {
 		projectPath,
 		installedPath: bridgeDir,
 		installedFiles,
-		migratedFiles,
 		version,
 		nextSteps: [
 			"Unity will auto-detect the new .cs files and recompile (may take a few seconds).",
