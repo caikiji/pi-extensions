@@ -9,6 +9,6 @@ namespace PiBridge
     // report a valid version.
     internal static class BridgeVersion
     {
-        public const string Value = "0.2.3";
+        public const string Value = "0.3.0";
     }
 }

@@ -182,7 +182,7 @@ unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
 
 ### 版本校验
 
-扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.2.0`),`ping` 时校验运行中的 bridge 版本。过旧则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 更新。升级扩展后,旧项目里的 PiBridge.cs 会被检测出来并引导更新。
+扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.3.0`),`ping` 时校验运行中的 bridge 版本。过旧(含旧版直接装在 `Assets/Editor/` 下的平铺布局)则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 重装到 `Assets/Editor/PiBridge/`。
 
 ### 工作原理
 - `[InitializeOnLoad]` 静态构造函数在项目加载时启动 `HttpListener`(后台线程)
