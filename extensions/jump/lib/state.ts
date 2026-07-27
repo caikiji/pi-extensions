@@ -144,13 +144,8 @@ export class GraphState {
       // which makes label/jump calls appear to auto-trigger a phantom jump.
       // On resume the model starts from the full (unfolded) physical context
       // and may choose to jump again. The persisted nodes are still useful:
-      // their ids remain valid jump targets.
-      this.activeJumpId = null;
-    }
-    // Mark all anchors stale (covers nodes created by an in-flight turn that
-    // didn't persist yet, redundantly with the loop above).
-    for (const node of this.nodes.values()) {
-      node.anchorIndex = -1;
+      // their ids remain valid jump targets. (activeJumpId was already
+      // cleared above; restored nodes already have anchorIndex = -1.)
     }
   }
 

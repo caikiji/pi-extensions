@@ -1,7 +1,6 @@
 /**
  * Shared types and constants for the jump extension.
  */
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 /** A node in the logical graph. id is the toolCallId of the creating call. */
 export interface GraphNode {
@@ -50,8 +49,3 @@ export const PEEK_MAX = 2000;
  *  to keep our folded-region estimate roughly consistent with pi's physical
  *  count. This is a rough heuristic, not a precise tokenizer. */
 export const CHARS_PER_TOKEN = 4;
-
-/** Minimal shape of a message we read for text/token extraction. We keep it
- *  structural (not importing the full union) so the helpers stay decoupled
- *  from the exact AgentMessage variant. */
-export type AnyMessage = AgentMessage;

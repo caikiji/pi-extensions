@@ -14,8 +14,7 @@
  * physical - lastFoldedEstimate so the model knows how much room it REALLY
  * has. When no jump is active, in-view == physical (no estimation needed).
  */
-import type { GraphState } from "./state.ts";
-import type { ContextUsageSnapshot } from "./state.ts";
+import type { ContextUsageSnapshot, GraphState } from "./state.ts";
 
 /** Format a token count for display: k for thousands, M for millions. */
 export function fmtTokens(n: number): string {

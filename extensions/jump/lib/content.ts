@@ -10,17 +10,12 @@ import { CHARS_PER_TOKEN, PREVIEW_MAX } from "./types.ts";
  *  Handles string content, TextContent parts, and ToolCall parts. Returns
  *  empty string for messages with no textual content. */
 export function messageToText(msg: AgentMessage): string {
-  const m = msg as {
-    role?: string;
-    content?: string | unknown[];
-    toolCallId?: string;
-    toolName?: string;
-  };
+  const m = msg as { content?: string | unknown[] };
   if (typeof m.content === "string") return m.content;
   if (!Array.isArray(m.content)) return "";
   const parts: string[] = [];
   for (const part of m.content) {
-    const p = part as { type?: string; text?: string; name?: string; input?: unknown };
+    const p = part as { type?: string; text?: string; name?: string };
     if (p && p.type === "text" && typeof p.text === "string") {
       parts.push(p.text);
     } else if (p && p.type === "tool_call" && typeof p.name === "string") {
@@ -35,10 +30,7 @@ export function messageToText(msg: AgentMessage): string {
  *  pi's getContextUsage() already gives an accurate physical count). Counts
  *  text content + tool_call names/args + thinking text. */
 export function estimateMessageTokens(msg: AgentMessage): number {
-  const m = msg as {
-    role?: string;
-    content?: string | unknown[];
-  };
+  const m = msg as { content?: string | unknown[] };
   let chars = 0;
   if (typeof m.content === "string") {
     chars += m.content.length;
@@ -73,12 +65,12 @@ export function estimateArrayTokens(messages: AgentMessage[]): number {
  *  annotate jump branch nodes so label_list can show what each branch holds.
  *  Truncates to PREVIEW_MAX chars. */
 export function buildPreview(messages: AgentMessage[], startIdx: number, endIdx: number): string {
-  if (startIdx < 0) startIdx = 0;
-  if (endIdx > messages.length) endIdx = messages.length;
-  if (endIdx <= startIdx) return "";
+  const start = Math.max(0, startIdx);
+  const end = Math.min(messages.length, endIdx);
+  if (end <= start) return "";
   const lines: string[] = [];
   let len = 0;
-  for (let i = startIdx; i < endIdx && len < PREVIEW_MAX; i++) {
+  for (let i = start; i < end && len < PREVIEW_MAX; i++) {
     const msg = messages[i];
     const role = (msg as { role?: string }).role ?? "?";
     const text = messageToText(msg).trim();
