@@ -199,122 +199,120 @@ Unity 有 `CompilationPipeline` 类可以触发域重载编译，但代价太大
 
 ---
 
-# 其他增强方向（与官方 CLI 的差距补齐）
 
-以下方向不限于 eval，是 PiBridge 整体能力对齐官方 CLI 可以做的事情。
+# 设计哲学：极简工具集 + 强 eval
 
-## 1. Play Mode 控制
+分析了主流 Unity MCP 项目（IvanMurzak/Unity-MCP、CoplayDev/unity-mcp、jlceaser/Unity-MCP-Vibe）的源码后，
+发现它们 70+ 工具中很多是同一个工具的不同 action 分支。
+
+**PiBridge 选择不同的路线：**
+
+不追求工具数量，而是让 eval 足够强（Roslyn），一个 eval 就能覆盖 MCP 项目 80% 的功能。
+
+| 操作 | MCP 项目需要 | PiBridge Roslyn eval 后 |
+|------|------------|------------------------|
+| 创建 GameObject | `manage_gameobject action=create` | `eval 'new GameObject("Cube").AddComponent<Rigidbody>()'` |
+| 改组件属性 | `manage_gameobject action=modify ...` | `eval 'go.GetComponent<Renderer>().material.color = Color.red'` |
+| 场景查询 | `find_gameobjects searchTerm=...` | `eval 'GameObject.FindObjectsOfType<Transform>().Length'` |
+| 批量操作 | 多次 round-trip 或 batch_execute | `eval 'for(...){...}' 一次 round-trip` |
+| 包管理 | `manage_packages action=add` | `eval 'PackageManager.Client.Add("com.unity.addressables")'` |
+| 测试 | `run_tests` | `eval 'TestRunner.RunAll()'` |
+
+Roslyn eval 做不到的，才加专用工具（目前只有截图）。
+
+
+# PiBridge 未来可补充的能力
+
+## P0 — Roslyn eval（核心主菜，已提案）
+
+见上文 Roslyn 方案。一个 eval 打天下。
+
+## P0 — Play Mode 控制（10 行 C#）
 
 **当前：** `status` 只读 `isPlaying`，没有控制命令
-**官方：** pipeline 可以控制 Enter/Exit Play Mode
-
-**可以加的（~10 行 C#）：**
+**加：**
 ```
 unity_command play --mode enter   # EditorApplication.EnterPlayMode()
 unity_command play --mode exit    # ExitPlayMode()
 unity_command play --mode pause   # isPaused = true
 ```
+Agent 能自己跑 Play Mode 测试 → 看结果 → 修 bug → 再跑，全自动闭环。
 
-加上这个，Agent 就能自己跑 Play Mode 测试 → 看结果 → 修 bug → 再跑，全自动闭环。
+## P0 — 截图（eval 做不到的事）
 
+**当前：** PiBridge 无法返回图像给 Agent
+**加：** `unity_command screenshot` 返回 base64 图片
 
-## 2. 命令发现机制（Agent 自省）
-
-**当前：** Agent 需要 README 里写死的命令列表
-**官方：** Agent 可以运行时查询可用命令
-
-**可以加的（~20 行 C#）：**
 ```
-unity_command list-commands   # 返回所有命令 + 参数签名 + 描述
+unity_command screenshot --mode game-view   # 返回 base64
+unity_command screenshot --mode scene-view  # SceneView 截图
 ```
-Agent 不用靠 prompt 记住，运行时问就行。
+
+这是 eval **唯一做不到的事**，因为需要把 RenderTexture 编码为图片传回。其他所有操作 eval 都能做。
 
 
-## 3. 自定义命令注册（对标 `[CliCommand]`）
+## P1 — 自定义命令注册 + 反射自动发现
 
-**当前：** 命令写死在 `switch` 里，用户不能扩展
-**官方：** 用 `[CliCommand]` 特性标记任意静态方法，Agent 自动发现
+**当前：** 命令写死在 PiBridge.cs 的 `switch` 里，用户不能扩展
+**加：** 参考 MCP 项目的 `[McpForUnityTool]` 属性模式
 
-**可以加的：**
 ```csharp
-// 用户在项目自己的 Editor 脚本里写：
-[PiCommand("count-scenes", "Count scenes in build settings")]
+// 用户在自己的 Editor 脚本里写，PiBridge 启动时自动发现
+[PiCommand("count_scenes", "Count scenes in build settings")]
 public static string CountScenes()
 {
     return $"Scenes in build: {EditorBuildSettings.scenes.Length}";
 }
 ```
-Agent 通过 `unity_command list-custom` 发现，通过 `unity_command run-custom count-scenes` 调用。
-这样用户项目的工具方法直接暴露给 Agent，不用改 PiBridge 源码。
+
+PiBridge 启动时扫描所有程序集，收集 `[PiCommand]` 标记的方法，
+通过 `unity_command list-commands` 暴露给 Agent。
 
 
-## 4. MCP 包装（让其他 Agent 也能用 PiBridge）
+## P2 — MCP 包装（跨 Agent）
 
-**当前：** 只能在 pi 里用
-**官方：** 内置 MCP 支持，Claude Code / Codex / Cursor 都能用
+**当前：** PiBridge 是 pi extension，只能在 pi 里用
+**加：** 在现有 TypeScript 层旁加一个 MCP server（~100 行）
 
-**可以加的：** 在扩展入口旁加一个 MCP server（基于 `@modelcontextprotocol/sdk`），
-把 PiBridge 的 5 个 tool 暴露为 MCP tools。其他 Agent 配置一行就能用。
-
-
-## 5. 纯文件操作工具（不依赖 Editor）
-
-**当前：** `unity_project` 已经读文件，但还可以扩展写操作
-**官方：** 文件级别的操作不依赖 bridge
-
-**可以加的（Agent 直接改文件，Editor 未启动也能用）：**
-
-| 工具 | 说明 |
-|------|------|
-| `unity_edit_project_settings` | 改 `ProjectSettings.asset` 字段（Company Name、scripting backend 等） |
-| `unity_edit_manifest` | 增删 `Packages/manifest.json` 的包依赖 |
-| `unity_switch_platform` | 改 BuildTarget（改 `ProjectSettings.asset` 里的字段） |
-
-这些在 Unity 未启动时也能用，对 CI 和初始项目配置很有价值。
-
-
-## 6. 多实例支持
-
-**当前：** `discoverBridge` 按端口顺序探测，找到第一个就返回
-**官方：** 可以管理多个 Editor 实例
-
-**可以加的：**
-- `unity_command` 支持按 `projectPath` 精确匹配实例（端口文件已写项目路径）
-- 新增 `unity_list_instances` 返回所有运行中的 PiBridge 实例列表
-
-
-## 7. Workflow 编排
-
-**当前：** Agent 需要自己组合多次 `unity_command` 调用
-**官方：** pipeline 提供流程化控制
-
-**可以加的（`bridge-client.ts` 里已有 `waitForCondition`，可再封装一步）：**
+```typescript
+// mcp-server.ts 复用 bridge-client.ts 已有逻辑
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+// ...
 ```
-unity_command run-workflow '{
-  "steps": [
-    {"command": "compile"},
-    {"command": "status", "pollUntil": "isCompiling", "waitFor": false},
-    {"command": "play", "args": {"mode": "enter"}},
-    {"command": "eval", "code": "Debug.Log(...)"},
-    {"command": "play", "args": {"mode": "exit"}}
-  ]
-}'
-```
-一次调用完成完整工作流，减少 Agent 的 round-trip。
+
+核心逻辑全在 PiBridge.cs 的 C# 侧，TypeScript 层只是薄薄的 HTTP 客户端。
+做 MCP 包装只需要适配协议层，C# 侧一行不改。
+
+
+## 不做（eval 替代）
+
+| MCP 项目有 | 为什么 PiBridge 不做 |
+|-----------|-------------------|
+| GameObject 创建/修改/删除 | eval 能做 `new GameObject()` + 反射/组件操作 |
+| 场景层级树 | eval 能做 `GetComponentsInChildren` 转 JSON |
+| 包管理 | eval 能调 `PackageManager.Client.Add()` |
+| Profiler 快照 | eval 能读 `ProfilerDriver` API |
+| 批量/编排 | eval 本身就是批量，for 循环比 round-trip 快 |
+| 多重实例 | 个人使用场景极少 |
+
+
+## Build 安全说明
+
+PiBridge 的所有 `.cs` 文件放在 `Assets/Editor/` 下，
+Unity 的 Build 过程**完全跳过 `Editor/` 文件夹**，不会打进发布的游戏/应用中。
 
 
 ---
 
-## 优先级建议
+# 优先级建议（更新版）
 
-| 优先级 | 方向 | 工作量 | 收益 |
+| 优先级 | 方向 | 工作量 | 理由 |
 |--------|------|--------|------|
-| 🔴 P0 | Play Mode 控制 | ~10 行 C# | Agent 能自测闭环 |
-| 🔴 P0 | 命令发现 `list-commands` | ~20 行 C# | 减少 prompt 维护 |
-| 🟡 P1 | 自定义 `[PiCommand]` 特性 | ~2h | 用户可扩展 |
-| 🟡 P1 | 纯文件操作工具 | ~1h/个 | 不依赖 Editor |
-| 🟢 P2 | MCP 包装 | ~2h | 其他 Agent 可用 |
-| 🟢 P2 | 多实例支持 | ~1h | 更鲁棒 |
-| ⚪ P3 | Workflow 编排 | ~3h | 高级自动化 |
+| 🔴 P0 | **Roslyn eval**（已提案） | ~半天 | 核心能力，覆盖 80% 场景 |
+| 🔴 P0 | **Play Mode 控制** | ~10 行 C# | Agent 能自测闭环 |
+| 🔴 P0 | **截图** | ~30 行 C# + 管道 | eval 做不到的事 |
+| 🟡 P1 | **反射自动发现 + 自定义命令** | ~2h | 可扩展性，用户能自己加工具 |
+| 🟢 P2 | **MCP 包装** | ~2h | 跨 Agent 可用 |
+| ⚪ 不做 | GameObject / 场景/ 包管理 / Profiler ... | — | eval 已覆盖 |
 
-Play Mode 控制 + 命令发现这两个**半天就能加上**，Agent 体验提升最明显。
+**核心理念：** 5-6 个精心设计的工具 + 强 eval，胜过 70 个细分工具。
