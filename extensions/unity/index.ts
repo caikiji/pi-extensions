@@ -87,7 +87,10 @@ export default function (pi: ExtensionAPI) {
 			if (!details) return new Text(theme.fg("dim", "(no status)"), 0, 0);
 			const running = details.isRunning ? theme.fg("success", "● running") : theme.fg("dim", "○ idle");
 			const version = details.unityVersion ? theme.fg("accent", details.unityVersion) : theme.fg("dim", "unknown version");
-			return new Text(`${running} ${version}`, 0, 0);
+			// Flag Compiling/Importing values that came from the flaky log-tail heuristic,
+			// not the authoritative bridge.
+			const est = details.statusSource === "heuristic" ? theme.fg("warning", " (est.)") : "";
+			return new Text(`${running} ${version}${est}`, 0, 0);
 		},
 	});
 
@@ -270,6 +273,7 @@ function formatUnityStatusResult(result: UnityStatusResult): string {
 	lines.push(`Running: ${result.isRunning ? "yes" : "no"}`);
 	lines.push(`Compiling: ${result.isCompiling ? "yes" : "no"}`);
 	lines.push(`Importing: ${result.isImporting ? "yes" : "no"}`);
+	lines.push(`Status source: ${result.statusSource}`);
 	lines.push(`Lockfile exists: ${result.lockfileExists ? "yes" : "no"}${result.lockfileLocked ? " (locked)" : ""}`);
 
 	if (result.isRunning) {
