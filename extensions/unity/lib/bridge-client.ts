@@ -81,10 +81,13 @@ export async function discoverBridge(projectPath: string): Promise<BridgeInfo> {
 		}
 	}
 
-	// 2. If we have a port from file, ping to confirm it's alive
+	// 2. If we have a port from file, ping to confirm it's alive. A version
+	//    mismatch is authoritative — return it so the caller can guide the user
+	//    to reinstall, rather than falling through to probing (which would also
+	//    mismatch on the same port and end in a generic "not running").
 	if (port && Number.isFinite(port)) {
 		const info = await pingBridge(port);
-		if (info.available) return info;
+		if (info.available || info.versionMismatch) return info;
 	}
 
 	// 3. Probe default ports
