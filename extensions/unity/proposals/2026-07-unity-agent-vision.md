@@ -75,6 +75,108 @@ Pi → unity_agent(mode: "run_task", prompt: "走到红色 checkpoint 触发它"
 
 N 默认取 3~5 帧，帧间隔约 200~300ms（取决于操作执行时间），构成一个低帧率的短视频片段。
 
+### 像素定位策略
+
+MiniCPM-V 看到的画面是压缩后的 384×384 分块，无法直接输出绝对像素坐标。
+工具层做换算：
+
+```
+模型输出: { action: "click", region: [0.75, 0.05, 0.98, 0.2] }
+                          ↑ 相对坐标 (0~1)
+                          ↓
+工具层: x = 0.75 * screen_width, y = 0.05 * screen_height
+```
+
+如果是 UI 按钮，优先用名称定位：
+
+```csharp
+eval 'GameObject.Find("StartButton").GetComponent<Button>().onClick.Invoke()'
+```
+
+### 输入模拟的三种方案
+
+run_task 模式需要向 Unity Play Mode 注入输入。有以下三种方案，按推荐优先级排列：
+
+#### 方案一：Input System API（推荐）
+
+如果项目使用了 New Input System Package，Unity 官方提供了输入模拟 API：
+
+```csharp
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
+
+// 鼠标移动
+InputSystem.QueueStateEvent(Mouse.current, new MouseState {
+    position = new Vector2(847, 322)
+});
+
+// 按下左键
+InputSystem.QueueStateEvent(Mouse.current, new MouseState {
+    position = new Vector2(847, 322),
+    buttons = 1
+});
+
+// 拖动（连续发位置事件）
+InputSystem.QueueStateEvent(Mouse.current, new MouseState {
+    position = new Vector2(900, 350),
+    buttons = 1
+});
+
+// 松开
+InputSystem.QueueStateEvent(Mouse.current, new MouseState {
+    position = new Vector2(900, 350),
+    buttons = 0
+});
+```
+
+这套 API 是 Unity 官方为自动化测试设计的，在 Play Mode 下正常工作，
+无需反射或私有 API。
+
+#### 方案二：Win32 API（Windows 专属）
+
+如果项目使用旧 Input Manager，或需要最真实的 OS 级输入模拟，可以通过 P/Invoke 调用 Win32：
+
+```csharp
+[DllImport("user32.dll")]
+static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+// 操作系统层面的鼠标事件——Unity 无法区分是真人还是 Agent
+mouse_event(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, x, y, 0, UIntPtr.Zero);
+```
+
+eval 可以直接执行这些代码。方案一和方案二都走 eval，无需新增命令。
+
+#### 方案三：AgentInput 脚本（兼容兜底）
+
+在 Unity 项目中挂载一个 AgentInput 脚本，暴露高层操作接口：
+
+```csharp
+public class AgentInput : MonoBehaviour {
+    public void MoveMouse(float x, float y) {
+        // 内部决定用 InputSystem API 还是 Win32
+    }
+    public void MouseClick() { ... }
+    public void Drag(float x1, float y1, float x2, float y2, float duration) {
+        StartCoroutine(DragRoutine(x1, y1, x2, y2, duration));
+    }
+}
+```
+
+eval 调这个脚本比直接写底层 API 更简洁：
+
+```csharp
+eval 'FindObjectOfType<AgentInput>().MouseClick()'
+```
+
+#### 方案选择
+
+| 项目情况 | 推荐方案 |
+|---------|--------|
+| 已用 New Input System | 方案一 |
+| 旧 Input Manager + Windows | 方案二 |
+| 旧 Input Manager + macOS | 方案三 |
+| 混合/不确定 | 方案三兜底 |
+
 ---
 
 ## PiBridge 需要新增的命令
