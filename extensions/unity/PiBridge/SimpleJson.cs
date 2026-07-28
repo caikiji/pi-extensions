@@ -24,6 +24,23 @@ namespace PiBridge
             if (t == typeof(string)) { WriteString(sb, (string)obj); return; }
             if (t == typeof(bool)) { sb.Append((bool)obj ? "true" : "false"); return; }
             if (t.IsPrimitive || t == typeof(decimal)) { sb.Append(Convert.ToString(obj, CultureInfo.InvariantCulture)); return; }
+            if (obj is IDictionary dict)
+            {
+                // JSON object: emit keys as strings, values recursively.
+                // Used by RoslynEval's return-value serialization (capsules, plain-object dicts).
+                sb.Append('{');
+                bool dfirst = true;
+                foreach (DictionaryEntry kv in dict)
+                {
+                    if (!dfirst) sb.Append(',');
+                    WriteString(sb, kv.Key?.ToString() ?? "");
+                    sb.Append(':');
+                    WriteValue(sb, kv.Value);
+                    dfirst = false;
+                }
+                sb.Append('}');
+                return;
+            }
             if (t.IsArray || t.GetInterface(nameof(IEnumerable)) != null)
             {
                 sb.Append('[');

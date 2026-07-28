@@ -20,7 +20,10 @@
  *
  * Security:
  *   - Listens on 127.0.0.1 ONLY (no LAN exposure)
- *   - Command whitelist (no arbitrary code by default; eval is opt-in via PI_BRIDGE_ALLOW_EVAL)
+ *   - Command whitelist; eval (arbitrary C#) is enabled by default — the bridge
+ *     is localhost-only and drives an Editor the user already opened, so eval is
+ *     no more a risk surface than run-menu. (The old PI_BRIDGE_ALLOW_EVAL opt-in
+ *     gate was removed in 0.6.0.)
  *
  * Compatibility: Unity 2019.4 LTS and later.
  *
@@ -493,21 +496,20 @@ namespace PiBridge
 
                 case "eval":
                 {
-                    if (Environment.GetEnvironmentVariable("PI_BRIDGE_ALLOW_EVAL") != "1")
-                    {
-                        return new Response
-                        {
-                            ok = false,
-                            error = "eval is disabled. Set PI_BRIDGE_ALLOW_EVAL=1 environment variable in Unity to enable."
-                        };
-                    }
                     string code = GetArg<string>(args, "code", "");
                     if (string.IsNullOrEmpty(code))
                         return new Response { ok = false, error = "code required" };
-                    // Evaluating arbitrary C# is non-trivial without compiler APIs.
-                    // For now, support calling a static method: "Type.Method" or "Type.Method(arg1,arg2)"
-                    object evalResult = EvalExpression(code);
-                    return new Response { ok = true, result = new { value = evalResult?.ToString(), type = evalResult?.GetType().FullName } };
+                    // Roslyn-backed: compiles + executes arbitrary C# on the main thread,
+                    // with full Unity API access. See RoslynEval.cs for threading/async
+                    // limitations and return-value serialization. Returns compile diagnostics
+                    // (with line/col) on error, or a bounded serialization of the result.
+                    //
+                    // Note: eval is enabled by default. PiBridge only listens on
+                    // 127.0.0.1 (no LAN exposure) and drives an Editor the user has
+                    // already opened — arbitrary C# in that context is no more a risk
+                    // than run-menu (which can already execute arbitrary menu items).
+                    // The old PI_BRIDGE_ALLOW_EVAL opt-in gate was removed in 0.6.0.
+                    return RoslynEval.Run(code);
                 }
 
                 case "manage-subscriptions":
@@ -520,51 +522,6 @@ namespace PiBridge
                 default:
                     return new Response { ok = false, error = "Unknown command: " + command };
             }
-        }
-
-        // Minimal "eval": call a static method by "FullName.Method" or "FullName.Method(a,b)".
-        private static object EvalExpression(string code)
-        {
-            int paren = code.IndexOf('(');
-            string typeAndMethod = paren >= 0 ? code.Substring(0, paren) : code;
-            string[] parts = typeAndMethod.Split('.');
-            if (parts.Length < 2)
-                throw new Exception("Expected 'Namespace.Type.Method' or 'Type.Method'");
-
-            string methodName = parts[parts.Length - 1];
-            string typeName = string.Join(".", parts, 0, parts.Length - 1);
-
-            // Search all assemblies for the type
-            Type type = null;
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                type = asm.GetType(typeName);
-                if (type != null) break;
-            }
-            if (type == null) throw new Exception("Type not found: " + typeName);
-
-            var method = type.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            if (method == null) throw new Exception("Method not found: " + methodName);
-
-            // Parse simple string args: Method("a", "b")
-            object[] methodArgs = null;
-            if (paren >= 0)
-            {
-                string argsStr = code.Substring(paren + 1, code.LastIndexOf(')') - paren - 1);
-                if (!string.IsNullOrWhiteSpace(argsStr))
-                {
-                    var argList = new List<object>();
-                    // Naive split — does not handle commas in strings
-                    foreach (var a in argsStr.Split(','))
-                    {
-                        var trimmed = a.Trim().Trim('"');
-                        argList.Add(trimmed);
-                    }
-                    methodArgs = argList.ToArray();
-                }
-            }
-
-            return method.Invoke(null, methodArgs);
         }
 
         // Read Unity Console entries via the internal LogEntries API.

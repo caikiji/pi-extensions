@@ -22,7 +22,12 @@
  *   asset-info  — load asset metadata (args: { path })
  *   log         — read recent Console entries (args: { count, severity })
  *                 severity filter: "error" (includes assert/exception), "warning", "log", or "" for all
- *   eval        — call a static method (args: { code }) — requires PI_BRIDGE_ALLOW_EVAL=1
+ *   eval        — compile + run an arbitrary C# snippet on the main thread (args: { code }) via Roslyn.
+ *                 Full Unity API access, multi-statement, LINQ, loops, `new GameObject()`, etc.
+ *                 Compile errors come back with line/col diagnostics; return value is bounded-serialized
+ *                 (primitives/strings/Vector3 as-is, complex objects as {type, toString}).
+ *                 Enabled by default (localhost-only bridge; no extra opt-in).
+ *                 v1 limit: avoid `await` in scripts — it can deadlock the main thread (see RoslynEval.cs).
  *
  * Background focus: when Unity is unfocused, EditorApplication.delayCall is throttled to ~1Hz, so the
  * bridge brings Unity to the foreground before dispatching (Windows only, bypasses the throttle).
@@ -55,7 +60,7 @@ export const unityCommandParams = Type.Object({
 	args: Type.Optional(
 		Type.Record(Type.String(), Type.Unknown(), {
 			description:
-				"Command arguments as JSON object. run-menu: { menuPath: 'File/Save' }. play: { mode: 'enter'|'exit'|'pause'|'resume' }. asset-info: { path: 'Assets/Foo.prefab' }. log: { count: 50 }. eval: { code: 'MyClass.MyMethod()' }.",
+			"Command arguments as JSON object. run-menu: { menuPath: 'File/Save' }. play: { mode: 'enter'|'exit'|'pause'|'resume' }. asset-info: { path: 'Assets/Foo.prefab' }. log: { count: 50 }. eval: { code: 'Mathf.Sqrt(16)' or a multi-statement C# block; the last expression is the return value; avoid await.' }.",
 		}),
 	),
 	timeout: Type.Optional(
