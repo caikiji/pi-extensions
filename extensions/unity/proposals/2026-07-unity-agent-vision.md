@@ -413,8 +413,75 @@ class MiniCPMVBackend implements VisionBackend {
 
 ---
 
+## 视觉模型部署要求
+
+本工具依赖一个运行在本地的多模态视觉模型服务。当前选用 **MiniCPM-V 4.6**
+（1.3B 参数，SigLIP2 视觉编码器 + Qwen3.5 语言模型），通过 llama.cpp 部署，
+提供 OpenAI 兼容的 HTTP API。
+
+### 开发与目标平台
+
+| 环境 | 说明 |
+|------|------|
+| **开发验证** | macOS Apple Silicon（M4, 16GB） |
+| **目标平台** | Windows（用户实际 Unity 开发环境） |
+| **Linux** | 也完全兼容，llama.cpp 全平台支持 |
+
+> 当前在 macOS 上完成概念验证，正式开发在 Windows 上进行。
+> 两个平台在部署方式上无实质差异。
+
+### 模型部署方式
+
+**推荐：llama.cpp + llama-server**（跨平台，OpenAI 兼容 API）
+
+```bash
+# 下载模型（平台无关）
+pip install huggingface-hub
+python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('openbmb/MiniCPM-V-4.6-gguf', 'MiniCPM-V-4_6-Q4_K_M.gguf', local_dir='.'); hf_hub_download('openbmb/MiniCPM-V-4.6-gguf', 'mmproj-model-f16.gguf', local_dir='.')"
+
+# 启动服务
+llama-server \
+  -m MiniCPM-V-4_6-Q4_K_M.gguf \
+  --mmproj mmproj-model-f16.gguf \
+  -ngl 99 \
+  --host 127.0.0.1 \
+  --port 18080
+```
+
+**合计约 1.5 GB** 磁盘空间，GPU 显存需求约 2~3 GB。
+macOS 用户可通过 `brew install llama.cpp` 安装；Windows 用户
+可从 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) 下载预编译包。
+
+### 所需文件
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `MiniCPM-V-4_6-Q4_K_M.gguf` | ~505 MB | 主模型（Q4_K_M 量化，推荐） |
+| `mmproj-model-f16.gguf` | ~1.0 GB | 视觉编码器投影矩阵 |
+
+低显存场景可选用 `Q4_0`（478 MB）或开启 16× Token 压缩模式。
+
+### 视觉后端 API
+
+TypeScript 层通过标准 OpenAI Chat Completions 接口调用：
+
+```
+POST http://localhost:18080/v1/chat/completions
+Content-Type: application/json
+
+{"messages":[{"role":"user","content":[
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}},
+  {"type":"text","text":"Describe this image"}
+]]}
+```
+
+其他兼容 OpenAI API 的视觉模型（GPT-4V、Qwen2-VL 等）只需修改 endpoint 即可接入。
+
+---
+
 ## 参考
 
 - [PiBridge Roadmap](../proposals/2026-07-pibridge-roadmap.md)
-- MiniCPM-V 4.6 本地部署: `~/Workspace/minicpm-v4.6/README.md`
-- llama-server API: `http://localhost:18080/v1/chat/completions`
+- [MiniCPM-V 4.6 HuggingFace](https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf)
+- [llama.cpp](https://github.com/ggml-org/llama.cpp)
+- [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
