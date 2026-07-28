@@ -184,6 +184,14 @@ namespace PiBridge
                         body = reader.ReadToEnd();
                 }
 
+                // SSE event stream — long-lived connection handled inline, NOT via
+                // main-thread dispatch (which is for one-shot commands).
+                if (path.Equals("events", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleSSE(context);
+                    return;
+                }
+
                 // Dispatch to main thread and wait for result.
                 // run-menu uses a shorter timeout because ExecuteMenuItem can block
                 // on a modal dialog and freeze the main thread.
@@ -502,6 +510,13 @@ namespace PiBridge
                     return new Response { ok = true, result = new { value = evalResult?.ToString(), type = evalResult?.GetType().FullName } };
                 }
 
+                case "manage-subscriptions":
+                {
+                    string action = GetArg<string>(args, "action", "");
+                    object eventsArg = GetArg<object>(args, "events", null);
+                    return UnityEvents.Manage(action, eventsArg);
+                }
+
                 default:
                     return new Response { ok = false, error = "Unknown command: " + command };
             }
@@ -706,6 +721,55 @@ namespace PiBridge
             byte[] bytes = Encoding.UTF8.GetBytes(json);
             response.ContentType = "application/json; charset=utf-8";
             response.ContentLength64 = bytes.Length;
+            response.OutputStream.Write(bytes, 0, bytes.Length);
+        }
+        // SSE event stream handler. Holds the HTTP connection open and streams
+        // queued events (filled by UnityEvents on the main thread) as
+        // text/event-stream. Runs on a threadpool thread (HandleRequest caller).
+        // Detects client disconnect via OutputStream.Write throwing on a dead
+        // connection; a periodic heartbeat comment forces a write during idle
+        // periods so disconnects are noticed within a few seconds.
+        private static void HandleSSE(HttpListenerContext context)
+        {
+            var response = context.Response;
+            response.ContentType = "text/event-stream; charset=utf-8";
+            response.Headers["Cache-Control"] = "no-cache";
+            response.Headers["Connection"] = "keep-alive";
+            long lastBeatTicks = 0;
+            try
+            {
+                while (true)
+                {
+                    while (UnityEvents.TryDequeue(out var ev))
+                        WriteSSE(response, ev);
+                    response.OutputStream.Flush();
+                    long now = DateTime.UtcNow.Ticks;
+                    if (now - lastBeatTicks > 5000L * TimeSpan.TicksPerMillisecond)
+                    {
+                        WriteSSEHeartbeat(response);
+                        lastBeatTicks = now;
+                    }
+                    System.Threading.Thread.Sleep(100);
+                }
+            }
+            catch { /* client disconnected or stream closed */ }
+            finally { try { response.Close(); } catch { } }
+        }
+
+        private static void WriteSSE(HttpListenerResponse response, UnityEvent ev)
+        {
+            var sb = new StringBuilder();
+            sb.Append("event: ").Append(ev.Type).Append('\n');
+            sb.Append("data: ").Append(SimpleJson.ToJson(ev.Data ?? new object())).Append("\n\n");
+            var bytes = Encoding.UTF8.GetBytes(sb.ToString());
+            response.OutputStream.Write(bytes, 0, bytes.Length);
+        }
+
+        // SSE comment line (": ping\n\n"). Sent purely to detect dead
+        // connections — clients ignore comment lines per the SSE spec.
+        private static void WriteSSEHeartbeat(HttpListenerResponse response)
+        {
+            var bytes = Encoding.UTF8.GetBytes(": ping\n\n");
             response.OutputStream.Write(bytes, 0, bytes.Length);
         }
 
