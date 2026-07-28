@@ -68,7 +68,7 @@ namespace PiBridge
             if (EditorPrefs.GetBool(CompilePendingKey, false))
             {
                 EditorPrefs.SetBool(CompilePendingKey, false);
-                Enqueue("compile_done", new { errors = GetErrorCount() });
+                EnqueueRaw("compile_done", new { errors = GetErrorCount() });
             }
         }
 
@@ -106,6 +106,16 @@ namespace PiBridge
             // hot path (every update tick) allocation-free when idle.
             if (_subs.Count == 0) return;
             if (!_subs.ContainsKey(type)) return;
+            EnqueueRaw(type, data);
+        }
+
+        // Unfiltered enqueue + queue cap. Used for compile_done replay from
+        // Register (post-domain-reload): at that moment _subs is empty (statics
+        // were wiped by the reload), so the filtered Enqueue would drop it.
+        // The replay must survive until a client reconnects and drains it.
+        private static void EnqueueRaw(string type, object data = null)
+        {
+            while (_queue.Count > 64) _queue.TryDequeue(out _);
             _queue.Enqueue(new UnityEvent { Type = type, Data = data });
         }
 
