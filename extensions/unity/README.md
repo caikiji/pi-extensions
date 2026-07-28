@@ -66,7 +66,7 @@ extensions/unity/
 ├── package.json                # pi 扩展声明
 ├── PiBridge/                   # C# HTTP bridge(装到项目 Assets/Editor/PiBridge/ 用)
 │   ├── PiBridge.cs             # 主类:HttpListener + 命令派发 + ExecuteCommand
-│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验;当前 0.3.0)
+│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验;当前 0.4.0)
 │   ├── WindowFocus.cs          # Win32 聚焦逻辑(绕过失焦节流)
 │   ├── Response.cs             # 响应结构
 │   └── SimpleJson.cs           # 极简 JSON 序列化/解析
@@ -95,14 +95,14 @@ extensions/unity/
 **前提**:项目 `Assets/Editor/PiBridge/` 下有 PiBridge 的 `.cs`(见下文「PiBridge 安装」)。扩展会校验 bridge 版本,过旧(含旧版装在 `Assets/Editor/` 根目录的平铺布局)时报 `versionMismatch` 并提示用 `unity_install_bridge` 重装。
 
 **参数**:
-- `command`: `ping` | `config` | `refresh` | `compile` | `status` | `run-menu` | `asset-info` | `log` | `eval`
+- `command`: `ping` | `config` | `refresh` | `compile` | `status` | `play` | `run-menu` | `asset-info` | `log` | `eval`
 - `projectPath?`:项目根,默认 cwd 自动探测
-- `args?`:命令参数对象(`run-menu` 需 `{ menuPath }`,`asset-info` 需 `{ path }`,`config` 需 `{ autoFocus }` 等)
+- `args?`:命令参数对象(`run-menu` 需 `{ menuPath }`,`play` 需 `{ mode: 'enter'|'exit'|'pause'|'resume' }`,`asset-info` 需 `{ path }`,`config` 需 `{ autoFocus }` 等)
 - `timeout?`:秒,默认 60(`run-menu` 默认 15)
 
 **流程**:
 1. `bridge-client.ts` 读 `Temp/pi-bridge-port` 发现端口(仅在端口文件存在时探测,避免 20 端口扫延迟);端口文件缺失则视为未安装
-2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`(当前 `0.3.0`),过旧则返回 `versionMismatch` 错误
+2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`(当前 `0.4.0`),过旧则返回 `versionMismatch` 错误
 3. HTTP POST `http://127.0.0.1:{port}/{command}`,body 是 args 的 JSON
 4. PiBridge 后台线程收到 → `EditorApplication.delayCall` 派发主线程(失焦时先自动聚焦,见下)→ 执行 → 返回 JSON
 5. 返回 `{ ok, result?, error?, durationMs }`
@@ -188,7 +188,7 @@ unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
 
 ### 版本校验
 
-扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.3.0`),`ping` 时校验运行中的 bridge 版本。过旧(含旧版直接装在 `Assets/Editor/` 下的平铺布局)则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 重装到 `Assets/Editor/PiBridge/`。
+扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.4.0`),`ping` 时校验运行中的 bridge 版本。过旧(含旧版直接装在 `Assets/Editor/` 下的平铺布局)则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 重装到 `Assets/Editor/PiBridge/`。
 
 ### 工作原理
 - `[InitializeOnLoad]` 静态构造函数在项目加载时启动 `HttpListener`(后台线程)
@@ -206,7 +206,7 @@ Unity Editor 失焦时,`EditorApplication.delayCall`/`update` 被节流到 ~1Hz(
 
 ### 安全边界
 - **只监听 127.0.0.1**,不暴露到局域网
-- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`run-menu`/`asset-info`/`log`/`eval`),不接受任意 C#
+- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`play`/`run-menu`/`asset-info`/`log`/`eval`),不接受任意 C#
 - `eval` 命令默认关闭,需在 Unity 启动前设环境变量 `PI_BRIDGE_ALLOW_EVAL=1`
 
 ### 已知限制
