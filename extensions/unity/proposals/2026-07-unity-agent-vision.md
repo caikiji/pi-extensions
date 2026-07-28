@@ -226,6 +226,60 @@ POST /capture
 实现方式：type=single 走 RenderTexture 同步渲染（同截图）。type=clip 在 Unity 主线程上逐帧采集，每帧间隔通过 `EditorApplication.update` 或协程控制，达到指定帧数后一次性返回。
 
 这样工具在 run_task 时调一次 `capture` 就能拿到最近几步的画面变化，不用自己拼。
+## 未解决的问题
+
+以下问题在提案阶段尚未定论，待实现时进一步决策：
+
+### 1. run_task 超时与 Pi tool call 的兼容
+
+Pi 的 tool call 有超时限制（通常几分钟）。run_task 循环可能跑 20 步、每步 2~3 秒，
+接近一分钟。如果 Pi 超时断开，中间状态就丢了。
+
+两种思路：
+- 工具内部维护状态，Pi 可以分多次调用接续任务
+- 循环完全在工具内部完成，超时前返回结果
+
+尚未决定用哪种。
+
+### 2. MiniCPM-V 输出可靠性
+
+小模型不一定每次都输出合法 JSON，可能出现：
+- 格式正确但 action 不在定义范围内
+- 格式正确但语义错误（画面没路却让往前）
+- 完全不是 JSON
+
+工具层需要兜底策略：重试？几次？还是直接报 stuck？
+
+### 3. Play Mode 崩溃检测
+
+run_task 跑着跑着 Play Mode 退出（编译、异常、手动退出），工具怎么感知？
+两种方式：
+- 每次 capture 时检测 isPlaying 字段
+- 依赖 unity_events 订阅 playmode_exited
+
+各有优劣，待定。
+
+### 4. 对 Roslyn eval 的前置依赖
+
+本工具的所有操控操作都依赖 `unity_command eval` 执行任意 C# 来驱动游戏。
+Roslyn eval 在 PR #1（feat/roslyn-eval-proposal）中，尚未合并。
+本提案的实操依赖它的落地。
+
+### 5. 基本动作集
+
+目前只提到了 move_forward 和 turn_left。实际 Play Mode 中需要的最小动作集是什么？
+初步猜测：
+
+| 动作 | 说明 |
+|------|------|
+| move_forward / backward | 前后移动 |
+| turn_left / right | 视角旋转 |
+| move_mouse | 鼠标移动到屏幕位置 |
+| click | 鼠标点击 |
+| drag | 鼠标拖拽 |
+| interact | 交互/E键 |
+| jump | 跳跃 |
+| wait | 等待 N 毫秒 |
 
 ---
 
