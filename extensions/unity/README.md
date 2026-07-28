@@ -66,10 +66,17 @@ extensions/unity/
 ├── package.json                # pi 扩展声明
 ├── PiBridge/                   # C# HTTP bridge(装到项目 Assets/Editor/PiBridge/ 用)
 │   ├── PiBridge.cs             # 主类:HttpListener + 命令派发 + ExecuteCommand
-│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验;当前 0.4.0)
+│   ├── RoslynEval.cs           # Roslyn C# 脚本编译执行(eval 命令)
+│   ├── BridgeVersion.cs        # 版本号(单一来源,ping 校验;当前 0.6.0)
 │   ├── WindowFocus.cs          # Win32 聚焦逻辑(绕过失焦节流)
 │   ├── Response.cs             # 响应结构
-│   └── SimpleJson.cs           # 极简 JSON 序列化/解析
+│   ├── SimpleJson.cs           # 极简 JSON 序列化/解析(含 IDictionary→JSON 对象)
+│   ├── UnityEvents.cs          # 事件队列 + SSE 源 + 域重载补发
+│   └── Roslyn/                 # C# scripting DLL(按 Unity 版本选 v3.11.0/v4.0.1/v4.8.0)
+│       ├── README.md          # 版本矩阵 + 复现说明
+│       ├── v3.11.0/            # Unity 2019.4 / 2020.3  (C# 7.3/8.0)
+│       ├── v4.0.1/             # Unity 2021.3 / 2022.3  (C# 9.0)
+│       └── v4.8.0/             # Unity 6+             (C# 10+)
 ├── lib/
 │   ├── paths.ts                # 项目根探测、日志路径定位、lockfile 检测
 │   ├── project-version.ts      # 读 ProjectVersion.txt,版本比较
@@ -102,7 +109,7 @@ extensions/unity/
 
 **流程**:
 1. `bridge-client.ts` 读 `Temp/pi-bridge-port` 发现端口(仅在端口文件存在时探测,避免 20 端口扫延迟);端口文件缺失则视为未安装
-2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`(当前 `0.4.0`),过旧则返回 `versionMismatch` 错误
+2. `ping` 校验 bridge 版本 ≥ `MIN_BRIDGE_VERSION`(当前 `0.6.0`),过旧则返回 `versionMismatch` 错误
 3. HTTP POST `http://127.0.0.1:{port}/{command}`,body 是 args 的 JSON
 4. PiBridge 后台线程收到 → `EditorApplication.delayCall` 派发主线程(失焦时先自动聚焦,见下)→ 执行 → 返回 JSON
 5. 返回 `{ ok, result?, error?, durationMs }`
@@ -113,8 +120,8 @@ extensions/unity/
 
 **安全**:
 - 只监听 `127.0.0.1`(不暴露局域网)
-- 命令白名单,无任意代码执行
-- `eval` 命令需在 Unity 启动前设 `PI_BRIDGE_ALLOW_EVAL=1` 环境变量
+- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`play`/`run-menu`/`asset-info`/`log`/`eval`/`manage-subscriptions`);`eval` 可执行任意 C#(Roslyn 编译),但 bridge 仅本地、驱动用户已打开的 Editor,风险面不高于 `run-menu`(本已可执行任意菜单项)
+- `eval` 默认启用(0.6.0 起移除了旧的 `PI_BRIDGE_ALLOW_EVAL` opt-in 开关),依赖随 `unity_install_bridge` 一起部署的 Roslyn DLL(见「Roslyn eval」)
 
 ---
 
@@ -188,7 +195,7 @@ unity_install_bridge({ projectPath: "D:/workspace/MyUnityProject" })
 
 ### 版本校验
 
-扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.4.0`),`ping` 时校验运行中的 bridge 版本。过旧(含旧版直接装在 `Assets/Editor/` 下的平铺布局)则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 重装到 `Assets/Editor/PiBridge/`。
+扩展和 PiBridge.cs **一起版本化**。扩展声明 `MIN_BRIDGE_VERSION`(当前 `0.6.0`),`ping` 时校验运行中的 bridge 版本。过旧(含旧版直接装在 `Assets/Editor/` 下的平铺布局)则 `unity_command` 返回 `versionMismatch` 错误,提示用 `unity_install_bridge` 重装到 `Assets/Editor/PiBridge/`(同时部署对应版本的 Roslyn DLL)。
 
 ### 工作原理
 - `[InitializeOnLoad]` 静态构造函数在项目加载时启动 `HttpListener`(后台线程)
@@ -204,14 +211,46 @@ Unity Editor 失焦时,`EditorApplication.delayCall`/`update` 被节流到 ~1Hz(
 - 默认开启,可用 `config { autoFocus: false }` 关闭
 - 建议同时在 Unity `Preferences → General → Interaction Mode` 设为 `No Throttling`,进一步降低前台延迟
 
+## Roslyn eval(0.6.0+)
+
+`eval` 命令由 Roslyn `Microsoft.CodeAnalysis.CSharp.Scripting` 驱动,不再是旧的反射调用。agent 可以提交任意 C# 代码片段在 Editor 主线程编译+执行,有完整 Unity API 访问。
+
+**工作原理**:`CSharpScript.Create(code, ScriptOptions.WithReferences(AppDomain 程序集).WithImports(...))` → 预检编译诊断 → `RunAsync()` 在主线程同步完成 → 返回值经 `SerializeReturnValue` 有界序列化。
+
+**Roslyn DLL 部署**:`unity_install_bridge` 读 `ProjectVersion.txt` 选对应版本,复制到 `Assets/Editor/PiBridge/Roslyn/`:
+
+| Unity 版本 | Roslyn | C# | 来源 |
+|-----------|--------|-----|------|
+| 2019.4 / 2020.3 | v3.11.0 | 7.3/8.0 | NuGet netstandard2.0 |
+| 2021.3 / 2022.3(含 Tuanjie) | v4.0.1 | 9.0 | NuGet netstandard2.0 |
+| Unity 6 / Tuanjie 6 | v4.8.0 | 10+ | NuGet netstandard2.0 |
+
+只随发非 BCL 的 DLL(`Microsoft.CodeAnalysis.*`、`System.Collections.Immutable`、`System.Reflection.Metadata`、`System.Runtime.CompilerServices.Unsafe`、`System.Memory`、`System.Buffers`、`System.Threading.Tasks.Extensions`、`System.Text.Encoding.CodePages`),避免与 Unity Mono 运行时已有的 BCL 类型冲突。复现与详情见 `PiBridge/Roslyn/README.md`。
+
+**返回值序列化**:
+- 原语 / string / decimal / enum → 原样
+- Vector3/Color/Rect 等常用值类型 → 反射 public 字段(`{"x":1,"y":2,"z":3}`)
+- IEnumerable → 元素递归序列化(上限 50 项)
+- 匿名/DTO 对象(非 UnityEngine.Object)→ 属性递归 + 环检测 + 深度限制
+- 其它(GameObject/Component/Type 等)→ `{type, toString}` 胶囊(toString 截断)
+- `SimpleJson` 已增强:`IDictionary` 输出为 JSON 对象(不是数组)
+
+**编译错误**:返回 `{ok:false, error, result:{kind:"compile", diagnostics:[{severity,id,message,file,line,column}]}}`,带行号列号,agent 可直接诊断修代码。
+
+**v1 限制**:
+- 不支持脚本里的 `await` — 主线程上 `RunAsync().GetAwaiter().GetResult()` 同步阻塞,`await` 需要主线程续行会死锁。写同步代码。`DispatchToMainThread` 的 120s 超时仍会兜底失控脚本。(async 死锁行为待实机验证;验证后此条可能软化。)
+- 每次调用是独立提交,不共享全局对象(locals 不跨调用持久)。`ScriptOptions` 每次重建以拿到域重载后的程序集。
+- 默认启用(0.6.0 起移除了旧的 `PI_BRIDGE_ALLOW_EVAL` opt-in 开关 — bridge 仅本地、驱动用户已打开的 Editor,eval 不比 `run-menu` 更危险)。
+
 ### 安全边界
 - **只监听 127.0.0.1**,不暴露到局域网
-- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`play`/`run-menu`/`asset-info`/`log`/`eval`),不接受任意 C#
-- `eval` 命令默认关闭,需在 Unity 启动前设环境变量 `PI_BRIDGE_ALLOW_EVAL=1`
+- 命令白名单(`ping`/`config`/`refresh`/`compile`/`status`/`play`/`run-menu`/`asset-info`/`log`/`eval`/`manage-subscriptions`);`eval` 可执行任意 C#(Roslyn 编译),但 bridge 仅本地、驱动用户已打开的 Editor,风险面不高于 `run-menu`
+- `eval` 默认启用(0.6.0 起移除了旧的 `PI_BRIDGE_ALLOW_EVAL` opt-in 开关),依赖随 `unity_install_bridge` 一起部署的 Roslyn DLL(见上)
 
 ### 已知限制
 - `run-menu` 调 `EditorApplication.ExecuteMenuItem` 是同步阻塞的,若触发模态对话框会冻结主线程导致 bridge 无响应(15s 超时 + 拒绝在已有对话框时执行)
 - 首次安装/更新 PiBridge 后需 Unity 获得焦点触发编译(若 bridge 未起来,`unity_command` 会提示重装)
+- `eval` v1 不支持脚本里的 `await`(主线程阻塞可能死锁);写同步 C# 即可,见上
 
 ---
 

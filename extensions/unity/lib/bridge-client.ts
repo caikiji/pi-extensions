@@ -29,7 +29,7 @@ export const PORT_FILE = "pi-bridge-port";
  * version, discoverBridge returns available=false with versionMismatch set,
  * so the caller can tell the user to reinstall via unity_install_bridge.
  */
-export const MIN_BRIDGE_VERSION = "0.5.0";
+export const MIN_BRIDGE_VERSION = "0.6.0";
 
 /**
  * Compare semver-like version strings ("0.2.0" < "0.10.0"). Returns true if
