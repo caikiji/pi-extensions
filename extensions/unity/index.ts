@@ -15,6 +15,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { runUnityCommand, unityCommandParams, type UnityCommandResult } from "./tools/unity-command.ts";
+import { runUnityEvents, unityEventsParams, type UnityEventsResult } from "./tools/unity-events.ts";
 import { runUnityInstallBridge, unityInstallBridgeParams, type UnityInstallBridgeResult } from "./tools/unity-install-bridge.ts";
 import { runUnityLog, unityLogParams, type UnityLogResult } from "./tools/unity-log.ts";
 import { runUnityProject, unityProjectParams, type UnityProjectResult } from "./tools/unity-project.ts";
@@ -169,6 +170,47 @@ export default function (pi: ExtensionAPI) {
 			const status = ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
 			const duration = `${details.response.durationMs}ms`;
 			return new Text(`${status} ${theme.fg("accent", details.command)} ${theme.fg("dim", duration)}`, 0, 0);
+		},
+	});
+
+	// ─── unity_events ───────────────────────────────────────────────────────
+	// Non-blocking event subscriptions. The agent subscribes, then keeps
+	// working. When Unity fires a subscribed event (compile done, play mode
+	// changed), PiBridge pushes it over an SSE stream and this tool's
+	// background loop injects it via pi.sendUserMessage — no polling. This
+	// is the pi-unique capability MCP cannot replicate.
+	pi.registerTool({
+		name: "unity_events",
+		label: "Unity Events",
+		description:
+			"Subscribe to Unity events (compile_started/compile_done, playmode_entered/playmode_exited) and get notified non-blocking. " +
+			"Events fire inside Unity and are pushed to the agent via a background SSE stream + pi.sendUserMessage — no polling, no waiting. " +
+			"Requires PiBridge v0.5.0+. Use action=subscribe with events=[...] to start receiving notifications, action=list to see current subscriptions, action=unsubscribe to stop specific events.",
+		promptSnippet: "Subscribe to Unity events (compile/playmode) — non-blocking, pushed via SSE",
+		promptGuidelines: [
+			"Use unity_events (action=subscribe) BEFORE triggering a long Unity operation (compile, play mode) so you get notified when it finishes instead of polling unity_command status.",
+			"After subscribe, continue working — events arrive as follow-up user messages (deliverAs: followUp). compile_done data includes {errors:N}; if errors>0, follow up with unity_log to diagnose.",
+			"Events are best-effort across domain reload: Unity recompiling/reloading clears the queue and may change the bridge port; the SSE loop auto-reconnects and re-discovers the port, but events that fire during the reload window are lost. Re-subscribe if needed after a reload.",
+			"unsubscribe only removes the server-side filter; it does not stop the background SSE loop (cheap to leave running). Subscribe to the events you need rather than all of them.",
+		],
+		parameters: unityEventsParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await runUnityEvents(params as UnityEventsParams, ctx.cwd, pi);
+			return {
+				content: [{ type: "text", text: formatUnityEventsResult(result) }],
+				details: result,
+			};
+		},
+
+		renderResult(result, _options, theme) {
+			const details = result.details as UnityEventsResult | undefined;
+			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
+			if (!details.bridge.available) return new Text(theme.fg("warning", "⚠ bridge offline"), 0, 0);
+			const ok = details.response.ok;
+			const status = ok ? theme.fg("success", "✓") : theme.fg("error", "✗");
+			const loop = details.sseLoop === "running" ? theme.fg("accent", " (sse started)") : details.sseLoop === "reused" ? theme.fg("dim", " (sse reused)") : "";
+			return new Text(`${status} ${theme.fg("accent", details.bridge.url ?? "")}${loop}`, 0, 0);
 		},
 	});
 
@@ -379,6 +421,43 @@ function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 	lines.push("Next steps:");
 	for (const step of result.nextSteps) {
 		lines.push(`  • ${step}`);
+	}
+	return lines.join("\n");
+}
+
+function formatUnityEventsResult(result: UnityEventsResult): string {
+	const lines: string[] = [];
+	lines.push(`Unity Events — ${result.projectPath}`);
+	lines.push("");
+	if (!result.bridge.available) {
+		lines.push("⚠ PiBridge is not running.");
+		lines.push("");
+		lines.push("Open the Unity project and ensure PiBridge v0.5.0+ is installed, then retry.");
+		if (result.bridge.reason) lines.push(`Reason: ${result.bridge.reason}`);
+		return lines.join("\n");
+	}
+	lines.push(`Bridge: ${result.bridge.url} (v${result.bridge.version})`);
+	lines.push("");
+	if (result.response.ok) {
+		lines.push("✓ Success");
+		if (result.response.result !== undefined) {
+			lines.push("");
+			lines.push("Result:");
+			lines.push(JSON.stringify(result.response.result, null, 2));
+		}
+		if (result.sseLoop === "running") {
+			lines.push("");
+			lines.push("Background SSE stream started — events will arrive as follow-up messages.");
+		} else if (result.sseLoop === "reused") {
+			lines.push("");
+			lines.push("Background SSE stream already running for this project — reusing it.");
+		}
+	} else {
+		lines.push("✗ Failed");
+		if (result.response.error) {
+			lines.push("");
+			lines.push(`Error: ${result.response.error}`);
+		}
 	}
 	return lines.join("\n");
 }
