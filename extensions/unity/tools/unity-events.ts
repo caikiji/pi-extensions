@@ -69,6 +69,11 @@ interface SseState {
 }
 let sseState: SseState | null = null;
 
+// Event types the client wants. Persisted across SSE reconnects so the loop
+// can re-subscribe after a domain reload wipes the server-side _subs. Without
+// this, events fired after a reload would be filtered out server-side.
+const desiredSubscriptions = new Set<string>();
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function runUnityEvents(
@@ -95,6 +100,14 @@ export async function runUnityEvents(
 		{ action: params.action, events },
 		15000,
 	);
+
+	// Track desired subscriptions so the SSE loop can re-subscribe after a
+	// reconnect (domain reload wipes server-side state).
+	if (params.action === "subscribe") {
+		for (const e of events) desiredSubscriptions.add(e);
+	} else if (params.action === "unsubscribe") {
+		for (const e of events) desiredSubscriptions.delete(e);
+	}
 
 	let sseLoop: "running" | "reused" | "not-started" = "not-started";
 
@@ -141,6 +154,17 @@ async function startSseLoop(pi: ExtensionAPI, projectPath: string, signal: Abort
 		} catch {
 			await sleep(1000);
 			continue;
+		}
+
+		// Re-subscribe on every (re)connect: a Unity domain reload wipes the
+		// server-side _subs, so without this the server would filter out all
+		// events after the first reload. Best-effort — ignore failures.
+		if (desiredSubscriptions.size > 0) {
+			try {
+				await sendCommand(port, "manage-subscriptions", { action: "subscribe", events: [...desiredSubscriptions] }, 10000);
+			} catch {
+				// non-fatal; events may be missed this cycle, loop will retry next reconnect
+			}
 		}
 
 		try {
