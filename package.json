@@ -5,6 +5,6 @@
   "keywords": ["pi-package"],
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions/unity", "./extensions/jump", "./extensions/handoff.ts"]
+    "extensions": ["./extensions/unity", "./extensions/handoff.ts"]
   }
 }
