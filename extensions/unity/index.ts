@@ -137,7 +137,8 @@ export default function (pi: ExtensionAPI) {
 			"Execute a command in a RUNNING Unity Editor instance via PiBridge (an HTTP bridge inside the Editor). " +
 			"Requires PiBridge.cs in the project's Assets/Editor/ folder. " +
 			"Commands: ping (health check), refresh (AssetDatabase.Refresh), compile (trigger recompile), " +
-			"status (isCompiling/isPlaying/isUpdating), run-menu (execute a menu item — RISKY: can open a modal dialog that freezes Unity's main thread and makes the bridge unresponsive; 15s timeout, refuses if a dialog is already open), asset-info (load asset metadata), " +
+			"status (isCompiling/isPlaying/isUpdating), play (control Play Mode: enter/exit/pause/resume — may trigger domain reload that restarts the bridge; poll status afterwards), " +
+			"run-menu (execute a menu item — RISKY: can open a modal dialog that freezes Unity's main thread and makes the bridge unresponsive; 15s timeout, refuses if a dialog is already open), asset-info (load asset metadata), " +
 			"log (read recent Console entries), eval (call a static method, needs PI_BRIDGE_ALLOW_EVAL=1). " +
 			"This does NOT launch a new Unity process — it drives the already-open Editor via HTTP.",
 		promptSnippet: "Run a command in the open Unity Editor via PiBridge HTTP bridge",
@@ -145,6 +146,7 @@ export default function (pi: ExtensionAPI) {
 			"Use unity_command when Unity is already open for the project — it drives the running instance via HTTP.",
 			"Before unity_command, the PiBridge.cs file must be in Assets/Editor/. If unity_command reports 'PiBridge is not running', use unity_install_bridge to install it, then tell the user to focus Unity so it recompiles.",
 			"After unity_command with 'compile' or 'refresh', poll unity_command status (or unity_status) until isCompiling becomes false — the Editor throttles when unfocused, so completion is not instant.",
+			"After unity_command play (enter/exit), poll status until isPlaying matches the requested mode — EnterPlaymode/ExitPlaymode are async. Domain reload during the transition restarts the bridge; if a follow-up command fails, retry once status settles.",
 			"unity_command run-menu is risky: ExecuteMenuItem is blocking and can open a modal dialog that freezes Unity's main thread, making the bridge unresponsive. Prefer dedicated commands (refresh/compile/status) over run-menu. If run-menu times out, tell the user a dialog may be open in Unity and they should close it, then verify with ping.",
 		],
 		parameters: unityCommandParams,

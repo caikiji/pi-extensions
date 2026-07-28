@@ -359,6 +359,60 @@ namespace PiBridge
                             timeSinceStartup = EditorApplication.timeSinceStartup,
                         }
                     };
+                }
+
+                case "play":
+                {
+                    string mode = GetArg<string>(args, "mode", "");
+                    if (string.IsNullOrEmpty(mode))
+                        return new Response { ok = false, error = "mode required (enter/exit/pause/resume)" };
+
+                    switch (mode.ToLowerInvariant())
+                    {
+                        case "enter":
+                            if (EditorApplication.isPlaying)
+                                return new Response { ok = false, error = "Already in Play Mode. Use mode=exit to leave." };
+                            EditorApplication.EnterPlaymode();
+                            return new Response
+                            {
+                                ok = true,
+                                result = new
+                                {
+                                    mode = "enter",
+                                    requested = true,
+                                    isPlaying = EditorApplication.isPlaying,
+                                    note = "EnterPlaymode requested. Poll /status until isPlaying=true. Domain reload may restart the bridge; re-discover via ping if commands fail."
+                                }
+                            };
+                        case "exit":
+                            if (!EditorApplication.isPlaying)
+                                return new Response { ok = false, error = "Not in Play Mode. Use mode=enter to start." };
+                            EditorApplication.ExitPlaymode();
+                            return new Response
+                            {
+                                ok = true,
+                                result = new
+                                {
+                                    mode = "exit",
+                                    requested = true,
+                                    isPlaying = EditorApplication.isPlaying,
+                                    note = "ExitPlaymode requested. Poll /status until isPlaying=false. Domain reload may restart the bridge; re-discover via ping if commands fail."
+                                }
+                            };
+                        case "pause":
+                            if (!EditorApplication.isPlaying)
+                                return new Response { ok = false, error = "Cannot pause: not in Play Mode." };
+                            EditorApplication.isPaused = true;
+                            return new Response { ok = true, result = new { mode = "pause", isPaused = EditorApplication.isPaused, isPlaying = EditorApplication.isPlaying } };
+                        case "resume":
+                            if (!EditorApplication.isPlaying)
+                                return new Response { ok = false, error = "Cannot resume: not in Play Mode." };
+                            EditorApplication.isPaused = false;
+                            return new Response { ok = true, result = new { mode = "resume", isPaused = EditorApplication.isPaused, isPlaying = EditorApplication.isPlaying } };
+                        default:
+                            return new Response { ok = false, error = "Unknown mode: " + mode + ". Use enter/exit/pause/resume." };
+                    }
+                }
 
                 case "run-menu":
                 {
