@@ -40,6 +40,13 @@ namespace PiBridge
         private static readonly ConcurrentDictionary<string, bool> _subs = new ConcurrentDictionary<string, bool>();
         private static bool _wasCompiling;
 
+        // Persisted across domain reload (script recompile wipes statics + kills
+        // the bridge). Set when compile starts; cleared when compile_done is
+        // emitted. On post-reload Register, if still set, the compile that
+        // triggered the reload is now done — emit the compile_done the pre-reload
+        // edge-detection could never observe (isCompiling is already false by then).
+        private const string CompilePendingKey = "PiBridge.CompilePending";
+
         // Re-registered on every domain reload by Unity. EditorApplication.update
         // and playModeStateChanged are static events that do not survive reload,
         // so this is the single place they get (re-)attached.
@@ -52,6 +59,17 @@ namespace PiBridge
             EditorApplication.update += DetectCompileState;
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+
+            // Domain reload just happened (this runs after every reload). If a
+            // compile was in flight when the reload hit, it is now finished — the
+            // pre-reload DetectCompileState saw the true→false edge get swallowed
+            // by the reload (statics cleared, isCompiling already false on resume).
+            // Emit the compile_done the client is waiting for.
+            if (EditorPrefs.GetBool(CompilePendingKey, false))
+            {
+                EditorPrefs.SetBool(CompilePendingKey, false);
+                Enqueue("compile_done", new { errors = GetErrorCount() });
+            }
         }
 
         // Drain the queue from the SSE handler (background thread).
@@ -97,9 +115,15 @@ namespace PiBridge
         {
             bool isCompiling = EditorApplication.isCompiling;
             if (isCompiling && !_wasCompiling)
+            {
+                EditorPrefs.SetBool(CompilePendingKey, true);
                 Enqueue("compile_started");
+            }
             else if (!isCompiling && _wasCompiling)
+            {
+                EditorPrefs.SetBool(CompilePendingKey, false);
                 Enqueue("compile_done", new { errors = GetErrorCount() });
+            }
             _wasCompiling = isCompiling;
         }
 
