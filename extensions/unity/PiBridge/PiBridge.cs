@@ -359,7 +359,6 @@ namespace PiBridge
                             timeSinceStartup = EditorApplication.timeSinceStartup,
                         }
                     };
-                }
 
                 case "play":
                 {
