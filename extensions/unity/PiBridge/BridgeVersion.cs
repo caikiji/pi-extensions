@@ -9,6 +9,9 @@ namespace PiBridge
     // report a valid version.
     internal static class BridgeVersion
     {
-        public const string Value = "0.5.0";
+        public const string Value = "0.6.0";
+        // 0.6.0: Roslyn-backed eval (CSharpScript) replaces reflection-based EvalExpression;
+        //        arbitrary C# snippets compile+run on the main thread with full Unity API access.
+        //        see RoslynEval.cs. Bridge ships Roslyn DLLs (unity_install_bridge provisions them).
     }
 }

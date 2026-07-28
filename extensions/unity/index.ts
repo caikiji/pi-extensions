@@ -140,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 			"Commands: ping (health check), refresh (AssetDatabase.Refresh), compile (trigger recompile), " +
 			"status (isCompiling/isPlaying/isUpdating), play (control Play Mode: enter/exit/pause/resume — may trigger domain reload that restarts the bridge; poll status afterwards), " +
 			"run-menu (execute a menu item — RISKY: can open a modal dialog that freezes Unity's main thread and makes the bridge unresponsive; 15s timeout, refuses if a dialog is already open), asset-info (load asset metadata), " +
-			"log (read recent Console entries), eval (call a static method, needs PI_BRIDGE_ALLOW_EVAL=1). " +
+			"log (read recent Console entries), eval (Roslyn-compiled C# snippet on the main thread — arbitrary expressions/statements with full Unity API access; compile errors return line/col diagnostics; enabled by default, no opt-in needed). " +
 			"This does NOT launch a new Unity process — it drives the already-open Editor via HTTP.",
 		promptSnippet: "Run a command in the open Unity Editor via PiBridge HTTP bridge",
 		promptGuidelines: [
@@ -149,6 +149,7 @@ export default function (pi: ExtensionAPI) {
 			"After unity_command with 'compile' or 'refresh', poll unity_command status (or unity_status) until isCompiling becomes false — the Editor throttles when unfocused, so completion is not instant.",
 			"After unity_command play (enter/exit), poll status until isPlaying matches the requested mode — EnterPlaymode/ExitPlaymode are async. Domain reload during the transition restarts the bridge; if a follow-up command fails, retry once status settles.",
 			"unity_command run-menu is risky: ExecuteMenuItem is blocking and can open a modal dialog that freezes Unity's main thread, making the bridge unresponsive. Prefer dedicated commands (refresh/compile/status) over run-menu. If run-menu times out, tell the user a dialog may be open in Unity and they should close it, then verify with ping.",
+			"unity_command eval (command=eval, args={code}) runs an arbitrary C# snippet compiled by Roslyn on the main thread. Write plain C# — the LAST expression is the return value (e.g. 'Mathf.Sqrt(16)' or a multi-line block ending in an expression). Avoid `await` in eval scripts (v1): it can deadlock the main thread when a continuation needs to resume there. Return values are bounded-serialized: primitives/strings/Vector3 pass through, complex Unity objects come back as {type, toString}. If eval returns 'Roslyn eval is unavailable', run unity_install_bridge to provision the matching Roslyn DLLs, then retry.",
 		],
 		parameters: unityCommandParams,
 
@@ -185,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Subscribe to Unity events (compile_started/compile_done, playmode_entered/playmode_exited) and get notified non-blocking. " +
 			"Events fire inside Unity and are pushed to the agent via a background SSE stream + pi.sendUserMessage — no polling, no waiting. " +
-			"Requires PiBridge v0.5.0+. Use action=subscribe with events=[...] to start receiving notifications, action=list to see current subscriptions, action=unsubscribe to stop specific events.",
+			"Requires PiBridge v0.6.0+. Use action=subscribe with events=[...] to start receiving notifications, action=list to see current subscriptions, action=unsubscribe to stop specific events.",
 		promptSnippet: "Subscribe to Unity events (compile/playmode) — non-blocking, pushed via SSE",
 		promptGuidelines: [
 			"Use unity_events (action=subscribe) BEFORE triggering a long Unity operation (compile, play mode) so you get notified when it finishes instead of polling unity_command status.",
@@ -432,7 +433,7 @@ function formatUnityEventsResult(result: UnityEventsResult): string {
 	if (!result.bridge.available) {
 		lines.push("⚠ PiBridge is not running.");
 		lines.push("");
-		lines.push("Open the Unity project and ensure PiBridge v0.5.0+ is installed, then retry.");
+		lines.push("Open the Unity project and ensure PiBridge v0.6.0+ is installed, then retry.");
 		if (result.bridge.reason) lines.push(`Reason: ${result.bridge.reason}`);
 		return lines.join("\n");
 	}
