@@ -40,6 +40,7 @@ export const BRIDGE_COMMANDS = [
 	"refresh",
 	"compile",
 	"status",
+	"play",
 	"run-menu",
 	"asset-info",
 	"log",
@@ -54,7 +55,7 @@ export const unityCommandParams = Type.Object({
 	args: Type.Optional(
 		Type.Record(Type.String(), Type.Unknown(), {
 			description:
-				"Command arguments as JSON object. run-menu: { menuPath: 'File/Save' }. asset-info: { path: 'Assets/Foo.prefab' }. log: { count: 50 }. eval: { code: 'MyClass.MyMethod()' }.",
+				"Command arguments as JSON object. run-menu: { menuPath: 'File/Save' }. play: { mode: 'enter'|'exit'|'pause'|'resume' }. asset-info: { path: 'Assets/Foo.prefab' }. log: { count: 50 }. eval: { code: 'MyClass.MyMethod()' }.",
 		}),
 	),
 	timeout: Type.Optional(
