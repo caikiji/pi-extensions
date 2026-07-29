@@ -181,37 +181,24 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
  * @returns eval 步骤数组，每步是 { code, label, waitMs }
  */
 export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
-	const dur = action.params.duration_ms ?? 800;
 	const steps: ActionStep[] = [];
+	const key = action.params.key;
 
 	switch (action.action) {
-		case "move_forward":
-			steps.push({ code: `PiBridge.AgentInput.Move(0f, 1f, ${dur})`, label: `Move forward ${dur}ms`, waitMs: dur + 200 });
+		case "press":
+			steps.push({ code: `PiBridge.AgentInput.PressKey("${key}")`, label: `press ${key}`, waitMs: 0 });
 			break;
-		case "move_backward":
-			steps.push({ code: `PiBridge.AgentInput.Move(0f, -1f, ${dur})`, label: `Move backward ${dur}ms`, waitMs: dur + 200 });
-			break;
-		case "turn_left":
-			// yaw 负 = 向左转。系数 0.15：600ms≈90度，足够明显改变视角。
-			// C# float 字面量需 f 后缀，这里 JS 算好数值再拼。
-			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.15).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
-			break;
-		case "turn_right":
-			steps.push({ code: `PiBridge.AgentInput.Turn(${(dur * 0.15).toFixed(2)}f, 0f, ${dur})`, label: `Turn right ${dur}ms`, waitMs: dur + 200 });
+		case "release":
+			steps.push({ code: `PiBridge.AgentInput.ReleaseKey("${key}")`, label: `release ${key}`, waitMs: 0 });
 			break;
 		case "interact":
-			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "Interact", waitMs: 500 });
+			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "interact", waitMs: 0 });
 			break;
 		case "jump":
-			steps.push({ code: `PiBridge.AgentInput.Jump()`, label: "Jump", waitMs: 500 });
-			break;
-		case "click":
-			// AgentInput 不处理 UI 点击，回退到 Win32 mouse_event。
-			// 注意：这会移动 OS 鼠标。若任务纯 3D 无 UI，模型不应产生 click。
-			steps.push({ code: mouseClickCode(action.params.x ?? 0.5, action.params.y ?? 0.5), label: `click ${action.params.x ?? 0.5},${action.params.y ?? 0.5}`, waitMs: 400 });
+			steps.push({ code: `PiBridge.AgentInput.Jump()`, label: "jump", waitMs: 0 });
 			break;
 		case "wait":
-			steps.push({ code: `"wait ${dur}ms"`, label: `wait ${dur}ms`, waitMs: dur });
+			steps.push({ code: `"wait"`, label: "wait", waitMs: 0 });
 			break;
 	}
 
