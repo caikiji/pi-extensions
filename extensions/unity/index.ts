@@ -405,6 +405,14 @@ function formatUnityCommandResult(result: UnityCommandResult): string {
 			lines.push("");
 			lines.push(`Error: ${result.response.error}`);
 		}
+		// Some commands return structured detail even on failure (e.g. eval returns
+		// {kind, diagnostics, stack}). Surface it so the agent can diagnose without
+		// having to read the raw response.
+		if (result.response.result !== undefined && result.response.result !== null) {
+			lines.push("");
+			lines.push("Detail:");
+			lines.push(JSON.stringify(result.response.result, null, 2));
+		}
 	}
 
 	return lines.join("\n");
