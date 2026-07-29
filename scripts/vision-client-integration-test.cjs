@@ -57,6 +57,7 @@ async function askVision(imageDataUrl, prompt) {
       ] }],
       temperature: 0.3,
       max_tokens: MAX_TOKENS,
+      reasoning_effort: "none",
     }),
   });
   const json = await res.json();
@@ -91,6 +92,7 @@ ${historyText}
       ] }],
       temperature: 0.2,
       max_tokens: MAX_TOKENS,
+      reasoning_effort: "none",
       response_format: { type: "json_schema", json_schema: { name: "agent_action", schema: ACTION_SCHEMA, strict: true } },
     }),
   });
