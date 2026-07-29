@@ -188,6 +188,9 @@ export async function askVision(image: string, prompt: string, signal?: AbortSig
 		],
 		temperature: 0.3,
 		max_tokens: VISION_MAX_TOKENS,
+		// 关闭 thinking/reasoning：minicpmv4.6 默认开 thinking，reasoning_content 会占满 max_tokens
+		// 导致 content 空返回（finish=length）。我们只要直接输出，不需要思考链。
+		reasoning_effort: "none",
 	};
 
 	const res = await fetch(url, {
@@ -262,6 +265,7 @@ ${historyText}
 		temperature: 0.3,
 		// 全量历史帧视觉 token 多，max_tokens 给双倍避免被占满截断
 		max_tokens: VISION_MAX_TOKENS * 2,
+		reasoning_effort: "none",  // 关闭 thinking，避免 reasoning 占满 max_tokens
 	};
 
 	const res = await fetch(url, {
@@ -371,8 +375,9 @@ ${historyText}
 				},
 			],
 			temperature: 0.2,
-			max_tokens: VISION_MAX_TOKENS,
-			// JSON schema 约束（OpenAI 标准 json_schema 格式，与 ollama format 等价）
+		max_tokens: VISION_MAX_TOKENS,
+		reasoning_effort: "none",  // 关闭 thinking，避免 reasoning 占满 max_tokens 致 content 空返回
+		// JSON schema 约束（OpenAI 标准 json_schema 格式，与 ollama format 等价）
 			response_format: {
 				type: "json_schema",
 				json_schema: { name: "agent_action", schema: ACTION_SCHEMA, strict: true },
