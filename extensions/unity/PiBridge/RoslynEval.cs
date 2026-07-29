@@ -65,6 +65,7 @@ using System.Linq;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 using UnityEditor;
 using UnityEngine;
@@ -123,34 +124,46 @@ namespace PiBridge
                 };
             }
 
-            // Try expression mode first, then statement mode. Whichever compiles
-            // and emits cleanly is the one we run. If BOTH fail to compile, we
-            // return the expression-mode diagnostics (usually the more useful set
-            // for the agent, since expression mode surfaces "not an expression"
-            // errors that pinpoint the real issue).
-            CompilationResult exprResult = TryCompileAndEmit(references, code, expressionMode: true);
+            // Try expression mode first, then statement modes. Whichever compiles
+            // and emits cleanly is the one we run. Three shapes, tried in order:
+            //   1. expression      : `return (object)(<code>);`            — bare expression like `1+2`
+            //   2. statement       : `<code>; return null;`                — pure statement block like `var x=5; Debug.Log(x);`
+            //   3. trailing-return : `<prefix>; return (object)(<tail>);`  — `var x=...; <expr>` where the agent intends the
+            //      last expression to be the return value (CSharpScript semantics). <tail> is detected via a real Roslyn
+            //      syntax walk, so `;` inside string literals / for-headers is never split.
+            //
+            // If ALL fail, we return the expression-mode diagnostics (usually the most useful set for the agent,
+            // since expression mode surfaces "not an expression" errors that pinpoint the real issue).
+            CompilationResult exprResult = TryCompileAndEmit(references, code, EvalMode.Expression);
             if (exprResult.compileErrors != null)
             {
                 // Expression mode had compile errors — try statement mode.
-                CompilationResult stmtResult = TryCompileAndEmit(references, code, expressionMode: false);
+                CompilationResult stmtResult = TryCompileAndEmit(references, code, EvalMode.Statement);
                 if (stmtResult.compileErrors != null)
                 {
-                    // Both failed. Return expression-mode diagnostics (fall back to
-                    // statement-mode if expression-mode produced zero errors for
-                    // some reason but still didn't emit).
-                    CompilationResult reported = exprResult.compileErrors.Count > 0 ? exprResult : stmtResult;
-                    return new Response
+                    // Pure statement mode failed (e.g. last token is a bare expression the agent wants returned).
+                    // Try trailing-return mode: promote the last expression statement to a return.
+                    CompilationResult trailResult = TryCompileAndEmit(references, code, EvalMode.TrailingReturn);
+                    if (trailResult.compileErrors != null)
                     {
-                        ok = false,
-                        error = "Compilation error: " + string.Join("  |  ", reported.compileErrors.Select(FormatDiagnostic)),
-                        result = new
+                        // All three failed. Return expression-mode diagnostics (fall back to statement-mode
+                        // if expression-mode produced zero errors for some reason but still didn't emit).
+                        CompilationResult reported = exprResult.compileErrors.Count > 0 ? exprResult :
+                                                    (stmtResult.compileErrors.Count > 0 ? stmtResult : trailResult);
+                        return new Response
                         {
-                            kind = "compile",
-                            diagnostics = reported.compileErrors.Select(FormatDiagnosticObject).ToArray(),
-                            warnings = reported.warnings.Select(FormatDiagnosticObject).ToArray(),
-                            mode = "expression+statement both failed",
-                        },
-                    };
+                            ok = false,
+                            error = "Compilation error: " + string.Join("  |  ", reported.compileErrors.Select(FormatDiagnostic)),
+                            result = new
+                            {
+                                kind = "compile",
+                                diagnostics = reported.compileErrors.Select(FormatDiagnosticObject).ToArray(),
+                                warnings = reported.warnings.Select(FormatDiagnosticObject).ToArray(),
+                                mode = "expression+statement+trailing-return all failed",
+                            },
+                        };
+                    }
+                    return ExecuteEmitted(trailResult.assembly, trailResult.assemblyName);
                 }
                 // Statement mode compiled — run it.
                 return ExecuteEmitted(stmtResult.assembly, stmtResult.assemblyName);
@@ -169,20 +182,27 @@ namespace PiBridge
             public string assemblyName;
         }
 
+        private enum EvalMode { Expression, Statement, TrailingReturn }
+
         private static CompilationResult TryCompileAndEmit(
-            List<MetadataReference> references, string code, bool expressionMode)
+            List<MetadataReference> references, string code, EvalMode mode)
         {
             string assemblyName = "PiBridge.Eval." + Guid.NewGuid().ToString("N");
-            string methodBody = expressionMode
-                ? "return (object)(" + code + ");"
-                // Statement mode: ensure the user code ends with a statement
-                // terminator before appending 'return null;'. A missing ';'
-                // would merge the last user statement with 'return null;' and
-                // break compilation (e.g. 'throw new X(...)' + 'return null;').
-                // Extra ';' on already-terminated code is a harmless empty statement.
-                : (code.TrimEnd().EndsWith(";") || code.TrimEnd().EndsWith("}")
-                    ? code
-                    : code + ";") + "\nreturn null;";
+            string methodBody = BuildMethodBody(code, mode);
+            if (methodBody == null)
+            {
+                // TrailingReturn mode could not identify a promotable trailing expression
+                // (e.g. code is a single declaration, or has no trailing expression statement).
+                // Synthesize a guaranteed-fail diagnostic so the caller falls through to the
+                // next mode / final error reporting.
+                return new CompilationResult
+                {
+                    compileErrors = new List<Diagnostic> { MakeError("PIEVAL_NO_TAIL", "No trailing expression to promote.") },
+                    warnings = new List<Diagnostic>(),
+                    assembly = null,
+                    assemblyName = assemblyName,
+                };
+            }
 
             string source =
                 "using System;" +
@@ -225,7 +245,6 @@ namespace PiBridge
             var allDiag = compilation.GetDiagnostics().ToList();
             var errors = allDiag.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
             var warnings = allDiag.Where(d => d.Severity == DiagnosticSeverity.Warning).ToList();
-
             if (errors.Count > 0)
             {
                 return new CompilationResult
@@ -305,6 +324,71 @@ namespace PiBridge
                     assemblyName = assemblyName,
                 };
             }
+        }
+
+        // Build the generated method body for the given eval mode. Returns null if
+        // TrailingReturn mode cannot identify a promotable trailing expression.
+        //
+        // Expression     : `return (object)(<code>);`
+        // Statement      : ensure <code> ends with a statement terminator, then append `return null;`.
+        //                  A missing ';' would merge the last user statement with `return null;` and break
+        //                  compilation (e.g. `throw new X(...)` + `return null;`). Extra ';' on
+        //                  already-terminated code is a harmless empty statement.
+        // TrailingReturn : split <code> into <prefix> (all statements except the last expression statement)
+        //                  and <tail> (the last expression statement's expression), then emit
+        //                  `<prefix> return (object)(<tail>);`. This gives `var x = 5; x` the CSharpScript
+        //                  semantics of returning `x`. The split is done via a Roslyn syntax walk so `;`
+        //                  inside string literals, char literals, or for-headers is never mistaken for a
+        //                  statement boundary.
+        private static string BuildMethodBody(string code, EvalMode mode)
+        {
+            string trimmed = code.TrimEnd();
+            if (mode == EvalMode.Expression)
+                return "return (object)(" + code + ");";
+
+            if (mode == EvalMode.Statement)
+            {
+                string body = (trimmed.EndsWith(";") || trimmed.EndsWith("}")) ? code : code + ";";
+                return body + "\nreturn null;";
+            }
+
+            // TrailingReturn mode.
+            int tailStart;
+            string tail = ExtractTrailingExpression(code, out tailStart);
+            if (tail == null) return null;
+            // Slice the original code at the trailing expression's start so preceding statements
+            // and whitespace are preserved verbatim, then append the return.
+            string prefix = code.Substring(0, tailStart);
+            string pt = prefix.TrimEnd();
+            if (!pt.EndsWith(";") && !pt.EndsWith("}")) prefix = prefix + ";";
+            return prefix + " return (object)(" + tail + ");";
+        }
+
+        // Parse <code> (wrapped in a dummy method body for valid statement context) and return
+        // the source text of the LAST ExpressionStatement's expression, or null if the code has
+        // no trailing expression statement (e.g. it ends in a declaration, a block, or nothing).
+        // <code> is wrapped rather than parsed as a CompilationUnit because bare statements as a
+        // top-level program need C# 9+ and produce a slow, unstable recovery tree; wrapping gives
+        // a clean BlockSyntax whose statement boundaries follow the real C# grammar (so `;` inside
+        // `for(int i=0;i<10;i++)` is never mistaken for a statement boundary).
+        // tailStart receives the 0-based offset of the trailing expression within the ORIGINAL
+        // user code (derived by subtracting the fixed wrapped-method prefix length from the
+        // expression's syntax span start).
+        private static string ExtractTrailingExpression(string code, out int tailStart)
+        {
+            tailStart = -1;
+            const string wrappedPrefix = "class __C { void __M() { ";
+            string wrapped = wrappedPrefix + code + " } }";
+            SyntaxTree tree = CSharpSyntaxTree.ParseText(wrapped);
+            SyntaxNode root = tree.GetRoot();
+            BlockSyntax block = root.DescendantNodes().OfType<BlockSyntax>().FirstOrDefault();
+            if (block == null) return null;
+            var stmts = block.Statements;
+            if (stmts.Count == 0) return null;
+            StatementSyntax last = stmts[stmts.Count - 1];
+            if (!(last is ExpressionStatementSyntax es)) return null;
+            tailStart = es.Expression.SpanStart - wrappedPrefix.Length;
+            return es.Expression.ToString();
         }
 
         // Fabricate a DiagnosticDescriptor for emit/load failures (which aren't
@@ -434,9 +518,20 @@ namespace PiBridge
 
             Type t = value.GetType();
 
-            // Primitives, string, decimal, enum: safe passthrough.
-            if (t == typeof(string) || t.IsPrimitive || t == typeof(decimal) || t.IsEnum)
+            // Primitives, string, decimal: safe passthrough (SimpleJson handles these directly).
+            if (t == typeof(string) || t.IsPrimitive || t == typeof(decimal))
                 return value;
+
+            // Enums: SimpleJson does NOT recognize enums and would reflect over their static
+            // members (every enum constant is a public static field of the same enum type,
+            // causing infinite recursion). Convert to a small {name, value} dict so the agent
+            // gets both the symbolic name and the underlying integer.
+            if (t.IsEnum)
+                return new Dictionary<string, object>
+                {
+                    { "name", Enum.GetName(t, value) },
+                    { "value", Convert.ToInt64(value) },
+                };
 
             // Common Unity value types (Vector3, Color, Rect, ...): convert to a
             // dictionary of their primitive public fields ourselves. We must NOT
@@ -452,6 +547,13 @@ namespace PiBridge
                 }
                 return dict;
             }
+
+            // UnityEngine.Object derivatives (GameObject, Component, Material, ...) must NOT
+            // be walked as IEnumerable even when they implement it (Transform enumerates
+            // children, Material enumerates nothing useful). Their property graphs are huge
+            // and many getters throw on the wrong thread / unloaded state. Capsule them.
+            if (typeof(UnityEngine.Object).IsAssignableFrom(t))
+                return Capsule(value, null);
 
             // Collections (but not string, already handled).
             if (value is IEnumerable)
