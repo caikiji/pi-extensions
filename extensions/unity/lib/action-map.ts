@@ -185,10 +185,10 @@ export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 	let key = action.params.key;
 
 	// 纠错：模型常把 wait 误带 key（想 press 却选了 wait），转成 press；
-	// release 漏 key 则跳过（无法执行）。
+	// press/release 漏 key 则转 wait（无法执行按键动作）。
 	let effectiveAction = action.action;
 	if (effectiveAction === "wait" && key) effectiveAction = "press";
-	if (effectiveAction === "release" && !key) effectiveAction = "wait";
+	if ((effectiveAction === "press" || effectiveAction === "release") && !key) effectiveAction = "wait";
 
 	switch (effectiveAction) {
 		case "press":
