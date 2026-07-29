@@ -232,11 +232,13 @@ const ACTION_SCHEMA = {
  * @param base64 不带 data: 前缀的纯 base64 PNG
  * @param taskGoal 任务描述，如 "走到红色 checkpoint 触发它"
  * @param history 已执行步骤（提供上下文，让模型知道之前做了什么）
+ * @param recentFrames 最近几帧的 base64 图片（时间顺序，最早→最近），让模型看到运动轨迹
  */
 export async function decideAction(
 	base64: string,
 	taskGoal: string,
 	history: ActionHistory[] = [],
+	recentFrames: string[] = [],
 	signal?: AbortSignal,
 ): Promise<{ action: AgentAction; durationMs: number }> {
 	const historyText =
@@ -244,9 +246,16 @@ export async function decideAction(
 			? "（这是任务第一步，无历史）"
 			: history.map((h, i) => `  步骤${i + 1}: action=${h.action}, result=${h.result}`).join("\n");
 
+	const frameCount = recentFrames.length + 1;
+	const frameDesc = frameCount <= 1
+		? "当前画面见附图（1 帧）。"
+		: `附图是最近 ${frameCount} 帧画面，按时间顺序排列（最早→最近），最后一张是当前画面。通过对比这些帧你可以看出角色的运动轨迹和视角变化，判断之前的动作是否生效、目标是否在移动。`;
+
 	const prompt = `你是游戏 AI agent。当前在 Unity Play Mode 中运行一个游戏。
 
 任务目标: ${taskGoal}
+
+${frameDesc}
 
 已执行的历史步骤:
 ${historyText}
@@ -276,7 +285,7 @@ ${historyText}
 		body: JSON.stringify({
 			model: OLLAMA_MODEL,
 			prompt,
-			images: [base64],
+			images: [...recentFrames, base64],
 			format: ACTION_SCHEMA,
 			stream: false,
 			options: { temperature: 0.2 },
