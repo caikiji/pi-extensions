@@ -57,6 +57,12 @@ namespace PiBridge
         // if you don't want the window stealing focus.
         private static bool AutoFocusEnabled = true;
 
+        // Wall-clock timestamp (UTC ticks) when this bridge instance started.
+        // Set in Start(). Domain reload recreates statics, so this changes on
+        // every reload — letting install verify the bridge actually restarted
+        // (i.e. the new PiBridge.cs compiled and loaded), not just that a port
+        // is still reachable. Exposed via ping.
+        private static long StartedAtTicks;
         private static HttpListener _listener;
         private static Thread _thread;
         private static int _port;
@@ -75,6 +81,7 @@ namespace PiBridge
             {
                 if (_listener != null) return; // already running
 
+                StartedAtTicks = DateTime.UtcNow.Ticks;
                 _port = FindFreePort();
                 if (_port < 0)
                 {
@@ -312,6 +319,7 @@ namespace PiBridge
                             applicationPath = EditorApplication.applicationPath,
                             autoFocus = AutoFocusEnabled,
                             isApplicationActive = appActive,
+                            startedAt = StartedAtTicks.ToString(),
                         }
                     };
                 }
