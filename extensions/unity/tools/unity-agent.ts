@@ -311,10 +311,18 @@ async function runTask(
 					"Play Mode 已退出（崩溃或手动停止）。", totalStart);
 			}
 
+			// 查询 agent 当前状态（按住的键/位置/朝向/速度），作为文本注入决策 prompt，
+			// 让模型明确“当前在做什么”而非只靠画面推断。
+			let agentState = "";
+			try {
+				const st = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetAgentState()" }, 5000);
+				if (st.ok && typeof st.result?.value === "string") agentState = st.result.value;
+			} catch { /* best-effort */ }
+
 			// 视觉决策
 			let decision: { action: AgentAction; durationMs: number };
 			try {
-				decision = await decideAction(capture.base64, prompt, history, frameHistory, decisionPrompt);
+				decision = await decideAction(capture.base64, prompt, history, frameHistory, decisionPrompt, agentState);
 			} catch (e) {
 				return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
 					`视觉决策失败（第 ${step} 步）: ${(e as Error).message}`, totalStart);
