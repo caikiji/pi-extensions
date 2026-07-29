@@ -102,7 +102,7 @@ namespace PiBridge
                 _thread.Start();
 
                 Debug.Log("[PiBridge] Listening on http://127.0.0.1:" + _port +
-                          " (version " + BridgeVersion.Value + ")");
+                          " (version " + BridgeVersion.Value + ") reload-test");
             }
         }
 
