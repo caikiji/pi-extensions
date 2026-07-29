@@ -164,3 +164,64 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
 
 	return steps;
 }
+
+/**
+ * AgentInput 版本：把 action 翻译成 PiBridge.AgentInput 的 eval 调用。
+ *
+ * 与 Win32 版本（actionToSteps）的区别：
+ *   - 完全不碰 OS 输入（不 keybd_event/mouse_event），不捕获用户鼠标键盘。
+ *   - Move/Turn 是一次 eval，AgentInput 内部计时器持续生效，无需 keydown/keyup 拆分。
+ *   - 需要先调 AgentInput.TakeOver() 接管（禁用游戏 PlayerController + 释放鼠标），
+ *     任务结束调 Release() 恢复。
+ *   - interact/jump 当前仅置标记（旧 Input Manager 无法注入 GetKeyDown），游戏需有
+ *     public 方法或 profile 才能真正触发——这里仍调用，预留 profile 扩展。
+ *   - click 仍回退到 Win32（AgentInput 不处理 UI 点击；若项目无 UI 点击需求可忽略）。
+ *
+ * @param action 模型决定的动作
+ * @returns eval 步骤数组，每步是 { code, label, waitMs }
+ */
+export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
+	const dur = action.params.duration_ms ?? 800;
+	const steps: ActionStep[] = [];
+
+	switch (action.action) {
+		case "move_forward":
+			steps.push({ code: `PiBridge.AgentInput.Move(0f, 1f, ${dur})`, label: `Move forward ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "move_backward":
+			steps.push({ code: `PiBridge.AgentInput.Move(0f, -1f, ${dur})`, label: `Move backward ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "turn_left":
+			// yaw 负 = 向左转。移动量随 duration 缩放（约 90度/800ms，可调）。
+			// C# float 字面量需 f 后缀，这里 JS 算好数值再拼。
+			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "turn_right":
+			steps.push({ code: `PiBridge.AgentInput.Move(1f, 0f, ${dur})`, label: `Move right ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "turn_left":
+			// yaw 负 = 向左转。移动量随 duration 缩放（约 90度/800ms，可调）。
+			// C# float 字面量需 f 后缀，这里 JS 算好数值再拼。
+			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "turn_right":
+			steps.push({ code: `PiBridge.AgentInput.Turn(${(dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn right ${dur}ms`, waitMs: dur + 200 });
+			break;
+		case "interact":
+			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "Interact", waitMs: 500 });
+			break;
+		case "jump":
+			steps.push({ code: `PiBridge.AgentInput.Jump()`, label: "Jump", waitMs: 500 });
+			break;
+		case "click":
+			// AgentInput 不处理 UI 点击，回退到 Win32 mouse_event。
+			// 注意：这会移动 OS 鼠标。若任务纯 3D 无 UI，模型不应产生 click。
+			steps.push({ code: mouseClickCode(action.params.x ?? 0.5, action.params.y ?? 0.5), label: `click ${action.params.x ?? 0.5},${action.params.y ?? 0.5}`, waitMs: 400 });
+			break;
+		case "wait":
+			steps.push({ code: `"wait ${dur}ms"`, label: `wait ${dur}ms`, waitMs: dur });
+			break;
+	}
+
+	return steps;
+}
