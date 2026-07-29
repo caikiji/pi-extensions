@@ -22,7 +22,18 @@ import { runUnityProject, unityProjectParams, type UnityProjectResult } from "./
 import { runUnityStatus, unityStatusParams, type UnityStatusResult } from "./tools/unity-status.ts";
 
 export default function (pi: ExtensionAPI) {
-	// ─── unity_log ──────────────────────────────────────────────────────────
+	// ─── custom TUI rendering for Unity event notifications ───────────────
+	// Unity events arrive as custom messages (customType: "unity-event") so they
+	// can be visually distinguished from user-typed messages in the transcript.
+	// They still participate in LLM context (the agent sees them), but render
+	// with a dim "[unity]" prefix instead of looking like the user typed them.
+	pi.registerMessageRenderer("unity-event", (message, _options, theme) => {
+		const ev = message.details as { event?: string; data?: string } | undefined;
+		const name = ev?.event ?? "event";
+		const data = ev?.data && ev.data !== "{}" ? ` ${ev.data}` : "";
+		return new Text(theme.fg("dim", `[unity] ${name}${data}`), 0, 0);
+	});
+
 	pi.registerTool({
 		name: "unity_log",
 		label: "Unity Log",
@@ -178,14 +189,14 @@ export default function (pi: ExtensionAPI) {
 	// Non-blocking event subscriptions. The agent subscribes, then keeps
 	// working. When Unity fires a subscribed event (compile done, play mode
 	// changed), PiBridge pushes it over an SSE stream and this tool's
-	// background loop injects it via pi.sendUserMessage — no polling. This
+	// background loop injects it via pi.sendMessage (customType "unity-event")
 	// is the pi-unique capability MCP cannot replicate.
 	pi.registerTool({
 		name: "unity_events",
 		label: "Unity Events",
 		description:
 			"Subscribe to Unity events (compile_started/compile_done, playmode_entered/playmode_exited) and get notified non-blocking. " +
-			"Events fire inside Unity and are pushed to the agent via a background SSE stream + pi.sendUserMessage — no polling, no waiting. " +
+			"Events fire inside Unity and are pushed to the agent via a background SSE stream + pi.sendMessage (customType \"unity-event\") — no polling, no waiting. " +
 			"Requires PiBridge v0.6.0+. Use action=subscribe with events=[...] to start receiving notifications, action=list to see current subscriptions, action=unsubscribe to stop specific events.",
 		promptSnippet: "Subscribe to Unity events (compile/playmode) — non-blocking, pushed via SSE",
 		promptGuidelines: [
@@ -456,7 +467,7 @@ function formatUnityEventsResult(result: UnityEventsResult): string {
 		}
 		if (result.sseLoop === "running") {
 			lines.push("");
-			lines.push("Background SSE stream started — events will arrive as follow-up messages.");
+			lines.push("Background SSE stream started — events arrive as custom unity-event messages (rendered with a [unity] prefix, may lag behind realtime).");
 		} else if (result.sseLoop === "reused") {
 			lines.push("");
 			lines.push("Background SSE stream already running for this project — reusing it.");
