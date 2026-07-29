@@ -263,7 +263,10 @@ export async function runUnityInstallBridge(
 						const newContent = logResult.content.slice(editorLogOffset);
 						const seen = new Set<string>();
 						for (const line of newContent.split("\n")) {
-							const m = line.match(/(Assets\\[^:]+\([^)]+\): error CS\d{4}:.*)/);
+						// Editor.log paths use double backslashes (Assets\\Editor\\...).
+						// Use a loose match: any line with Assets...error CSxxxx. Capture the
+						// file(line,col): error CSxxxx: description portion.
+						const m = line.match(/(Assets.*error CS\d{4}:.*)/);
 							if (m && !seen.has(m[1])) {
 								seen.add(m[1]);
 								compileErrors.push(m[1]);
