@@ -310,29 +310,25 @@ export async function decideAction(
 ): Promise<{ action: AgentAction; durationMs: number }> {
 	const historyText =
 		history.length === 0
-			? "（这是任务第一步，无历史）"
-			: history.map((h, i) => `  步骤${i + 1}: action=${h.action}, result=${h.result}`).join("\n");
+			? "（这是任务第一步）"
+			: history.map((h, i) => `步骤${i + 1}: ${h.action} | ${h.result}`).join("\n");
 
-	const frameCount = recentFrames.length + 1;
-	const frameDesc = frameCount <= 1
-		? "当前画面见附图（1 帧）。"
-		: `附图是全部历史画面共 ${frameCount} 帧，按时间顺序排列（最早→最近），最后一张是当前画面。通过对比这些帧你可以看出角色的运动轨迹和视角变化，判断之前的动作是否生效、目标是否在移动，记住目标出现过方位。`;
+	const rules = decisionPrompt ?? "决定下一步动作。";
 
-	const rules = decisionPrompt ?? "当前画面见附图。决定下一步动作。";
-
-	const prompt = `你是游戏 AI agent。当前在 Unity Play Mode 中运行一个游戏。
+	// prompt 结构为缓存友好：稳定前缀（任务+规则）→ 尾部追加的历史 → 末尾变化的当前状态。
+	// 这样 ollama prompt 前缀缓存能命中前面所有步骤，每步只多算新增的历史行 + 状态。
+	// 图片数组同理：images=[...历史帧, 当前帧]，前面帧前缀命中。
+	const prompt = `你是游戏 AI agent，在 Unity Play Mode 中操控角色。
 
 任务目标: ${taskGoal}
 
-${frameDesc}
-
-已执行的历史步骤:
-${historyText}
-
 ${rules}
 
-当前 agent 状态（据此决定下一步，注意 pressedKeys 里的是还按着的键）:
-${agentState ?? "(未知)"}`;
+已执行步骤:
+${historyText}
+
+当前 agent 状态: ${agentState ?? "(未知)"}`;
+
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
