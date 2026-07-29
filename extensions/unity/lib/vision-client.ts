@@ -195,7 +195,78 @@ export async function askVision(image: string, prompt: string, signal?: AbortSig
 	return content;
 }
 
-// ─── 2b. run_task 模式：结构化 action 决策（ollama 原生 + schema）─────────
+/**
+ * 任务结束总结：让视觉模型回顾全部历史帧 + 当前画面，总结
+ * “我尝试了什么、当前状态、为什么任务完成/未完成”，作为返回给调用方的摘要。
+ * 传全量帧命中 ollama prompt cache（与 decideAction 共享前缀）。
+ */
+export async function summarizeTask(
+	recentFrames: string[],
+	currentFrame: string,
+	taskGoal: string,
+	history: ActionHistory[],
+	status: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	const historyText = history.length === 0
+		? "（无历史步骤）"
+		: history.map((h, i) => `  步骤${i + 1}: action=${h.action}, result=${h.result}`).join("\n");
+	const frameCount = recentFrames.length + 1;
+	const images = [...recentFrames, currentFrame];
+	const prompt = `你是游戏 AI agent。任务已完成或中止，请总结。
+
+任务目标: ${taskGoal}
+
+附图是全部历史画面共 ${frameCount} 帧（最早→最近，最后一张是结束时的画面）。
+
+已执行的历史步骤:
+${historyText}
+
+任务最终状态: ${status}
+
+请总结：
+1. 你尝试了什么（主要动作序列）
+2. 当前角色/场景状态（基于最后一张画面）
+3. 任务是否达成？如果未达成，说明原因（找不到目标/卡住/超时等）
+4. 如果未完成，建议下一步怎么做
+
+用简洁的中文回答，不超过 200 字。`;
+
+	const url = `${OLLAMA_BASE_URL}/v1/chat/completions`;
+	const body = {
+		model: OLLAMA_MODEL,
+		messages: [
+			{
+				role: "user",
+				content: [
+					...images.map((b64) => ({
+						type: "image_url",
+						image_url: { url: `data:image/png;base64,${b64}` },
+					})),
+					{ type: "text", text: prompt },
+					],
+				},
+			],
+		temperature: 0.3,
+	};
+
+	const res = await fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body),
+		signal,
+	});
+	if (!res.ok) {
+		throw visionError("ollama", `ollama summarizeTask HTTP ${res.status}: ${await res.text()}`);
+	}
+	const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+	const content = json.choices?.[0]?.message?.content;
+	if (!content) {
+		throw visionError("ollama", "summarizeTask 返回的 content 为空");
+	}
+	return content;
+}
+
 //
 // JSON Schema 强制约束。Phase 0 实测：100% 合法 + action 不越界 + 字段齐全 +
 // 推理 1.7-2.1s（比 prompt 约束快 5-6 倍）。
