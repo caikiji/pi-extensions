@@ -257,3 +257,68 @@ export async function waitForCondition(
 		durationMs: Date.now() - start,
 	};
 }
+
+/**
+ * Wait for the PiBridge to come online (or return online after a domain reload).
+ *
+ * This is the right tool after an operation that triggers a Unity recompile —
+ * installing/updating PiBridge.cs, calling `compile`/`refresh` when the bridge
+ * code itself changed, or any edit that causes a domain reload. During a reload
+ * the bridge process (the C# HttpListener) is torn down and restarted by the
+ * new AppDomain, so a command sent in that window either fails to connect or
+ * hangs until the new bridge is up — which is exactly the gap callers hit when
+ * they fire a command immediately after install.
+ *
+ * Strategy: poll discoverBridge. To avoid returning on a stale bridge that is
+ * about to be torn down mid-reload, we require TWO consecutive successful
+ * pings `stableMs` apart. The first ping that succeeds may still be the old
+ * bridge; if a reload is in flight, the second ping (after the gap) will either
+ * hit the freshly-started bridge or fail (old one gone) — in the failure case
+ * we keep polling until the new one is up.
+ *
+ * Returns the discovered BridgeInfo. If the bridge never comes back within
+ * `timeoutMs`, returns the last unavailable BridgeInfo (caller decides what to
+ * do — typically report and let the user focus Unity / retry).
+ */
+export async function waitForBridge(
+	projectPath: string,
+	options: { timeoutMs?: number; intervalMs?: number; stableMs?: number; signal?: AbortSignal } = {},
+): Promise<{ bridge: BridgeInfo; waitedMs: number }> {
+	const timeout = options.timeoutMs ?? 45000;
+	const interval = options.intervalMs ?? 700;
+	const stableGap = options.stableMs ?? 600;
+	const signal = options.signal;
+	const start = Date.now();
+
+	let last: BridgeInfo = { available: false, reason: "not polled yet" };
+	let consecutiveOk = 0;
+	let lastOkPort: number | undefined;
+
+	while (Date.now() - start < timeout) {
+		if (signal?.aborted) break;
+		const info = await discoverBridge(projectPath);
+		last = info;
+		if (info.available) {
+			consecutiveOk++;
+			lastOkPort = info.port;
+			// Require two consecutive successes (with a gap between) so we don't
+			// latch onto a stale bridge that's about to die in a domain reload.
+			if (consecutiveOk >= 2) {
+				return { bridge: info, waitedMs: Date.now() - start };
+			}
+			// Wait the stabilization gap before re-checking.
+			await new Promise<void>((r) => {
+				const t = setTimeout(r, stableGap);
+				signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+			});
+		} else {
+			consecutiveOk = 0; // reset: bridge went away (reload in progress?)
+			await new Promise<void>((r) => {
+				const t = setTimeout(r, interval);
+				signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+			});
+		}
+	}
+
+	return { bridge: last, waitedMs: Date.now() - start };
+}

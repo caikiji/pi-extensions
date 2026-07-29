@@ -24,6 +24,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkS
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
+import { discoverBridge, waitForBridge } from "../lib/bridge-client.ts";
 
 export const unityInstallBridgeParams = Type.Object({
 	projectPath: Type.String({
@@ -49,6 +50,11 @@ export interface UnityInstallBridgeResult {
 	roslynVersion: string | null;
 	roslynDllsCopied: number;
 	nextSteps: string[];
+	// Whether the bridge was confirmed online (ping OK) after the install-triggered
+	// recompile. If false, a domain reload may still be in progress — the caller
+	// should retry ping/commands shortly, or focus the Unity window to speed it up.
+	bridgeReady: boolean;
+	bridgeWaitMs: number;
 }
 
 // Resolve the extension's own directory at runtime so we can read the bundled
@@ -188,6 +194,36 @@ export async function runUnityInstallBridge(
 		);
 	}
 
+	// 7. If Unity is open, the .cs changes trigger a recompile + domain reload,
+	//   which takes the bridge offline for a few seconds. Wait for it to come
+	//   back so the agent doesn't immediately fire a command into a dead bridge
+	//   (which would hang/timeout). If Unity isn't open, there's nothing to reload
+	//   — we report bridgeReady:false and tell the caller to open Unity.
+	//
+	//   We only wait if the bridge was online before install (Unity was open) —
+	//   otherwise there's no reload to recover from.
+	const bridgeWasOnline = (await discoverBridge(projectPath)).available;
+	let bridgeReady = false;
+	let bridgeWaitMs = 0;
+	if (bridgeWasOnline) {
+		const waited = await waitForBridge(projectPath, { timeoutMs: 45000 });
+		bridgeReady = waited.bridge.available;
+		bridgeWaitMs = waited.waitedMs;
+		if (bridgeReady) {
+			nextSteps.push(`Bridge confirmed back online after ${Math.round(bridgeWaitMs / 1000)}s. unity_command is ready.`);
+		} else {
+			nextSteps.push(
+				`⚠ Bridge did not come back online within ${Math.round(bridgeWaitMs / 1000)}s. `
+					+ "A recompile may still be in progress, or Unity lost focus and is throttled. "
+					+ "Focus the Unity window, then retry unity_command ping.",
+			);
+		}
+	} else {
+		nextSteps.push(
+			"Unity does not appear to be open for this project. Open it (or focus it) so it compiles the new PiBridge.cs and starts the bridge.",
+		);
+	}
+
 	return {
 		projectPath,
 		installedPath: bridgeDir,
@@ -196,5 +232,7 @@ export async function runUnityInstallBridge(
 		roslynVersion,
 		roslynDllsCopied,
 		nextSteps,
-};
+		bridgeReady,
+		bridgeWaitMs,
+	};
 }
