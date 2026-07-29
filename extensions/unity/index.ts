@@ -279,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 			"视觉驱动的 Unity Play Mode 测试工具。通过本地 MiniCPM-V 视觉模型“看见”游戏画面。\n" +
 			"两种模式：\n" +
 			"- observe: 截取当前画面并分析，不做操作（已实现）\n" +
-			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成（v2 开发中，当前返回 not implemented）\n" +
+			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成。视觉决策走 ollama schema（强制 JSON），输入注入走 eval 内联 Win32 keybd_event/mouse_event。超时返回 incomplete 可续跑。\n" +
 			"依赖：PiBridge 0.6.0+（eval）+ 本地 ollama + minicpm-v 模型。",
 		
 		promptSnippet: "让 MiniCPM-V 视觉模型分析 Unity 游戏画面（observe 模式）",
@@ -287,6 +287,8 @@ export default function (pi: ExtensionAPI) {
 			"Use unity_agent (mode=observe) to let a vision model (MiniCPM-V) see and analyze the current Unity Game View. Pass the analysis instruction in prompt.",
 			"unity_agent requires a local ollama service with a minicpm-v model loaded. If visionError reports ollama unavailable, start ollama and pull the model first.",
 			"observe mode captures via PiBridge eval (no new bridge command needed). The capture field reports isPlaying — if false, you are seeing the Editor scene view, not the running game. Enter Play Mode via unity_command play first for real gameplay.",
+			"run_task mode (requires Play Mode): loops capture→vision decision→input injection. Each step the model returns {action, params, status, reason} via ollama format schema. Input injection uses Win32 keybd_event/mouse_event (old Input Manager + Windows). Returns incomplete on timeout/crash — resume with a new run_task call (Unity state persists). Check taskStatus field for success/stuck/incomplete/crashed.",
+			"run_task input actions: move_forward/backward (W/S, params duration_ms), turn_left/right (mouse, params duration_ms), click (params x,y 0~1), interact (E), jump (Space), wait (params duration_ms). The model decides one atomic action per step."
 		],
 		parameters: unityAgentParams,
 
@@ -305,6 +307,11 @@ export default function (pi: ExtensionAPI) {
 				return new Text(theme.fg("error", `✗ ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms`), 0, 0);
 			}
 			const playing = details.capture?.isPlaying ? theme.fg("success", "▶ play") : theme.fg("dim", "○ edit");
+			if (details.mode === "run_task") {
+				const status = details.taskStatus ?? "?";
+				const statusColor = status === "success" ? "success" : status === "stuck" || status === "crashed" ? "error" : "warning";
+				return new Text(theme.fg("accent", `👁 run_task`) + theme.fg("dim", ` ${details.totalMs}ms `) + theme.fg(statusColor, `${status} (${details.stepsTaken ?? 0} steps)`), 0, 0);
+			}
 			return new Text(theme.fg("accent", `👁 ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms `) + playing, 0, 0);
 		},
 	});
@@ -548,6 +555,28 @@ function formatUnityAgentResult(result: UnityAgentResult): string {
 		lines.push("✗ Failed");
 		lines.push("");
 		lines.push(`Error: ${result.error}`);
+		return lines.join("\n");
+	}
+
+	// run_task 模式：显示任务状态 + 步骤历史
+	if (result.mode === "run_task") {
+		lines.push(`Task status: ${result.taskStatus ?? "?"} (${result.stepsTaken ?? 0} steps)`);
+		if (result.steps && result.steps.length > 0) {
+			lines.push("");
+			lines.push("Steps:");
+			for (const s of result.steps) {
+				lines.push(`  ${s.step}. ${s.action} ${JSON.stringify(s.params)} — ${s.reason} (${s.durationMs}ms)`);
+			}
+		}
+		if (result.analysis) {
+			lines.push("");
+			lines.push("Summary:");
+			lines.push(result.analysis);
+		}
+		if (result.error && result.taskStatus !== "success") {
+			lines.push("");
+			lines.push(`⚠ ${result.error}`);
+		}
 		return lines.join("\n");
 	}
 
