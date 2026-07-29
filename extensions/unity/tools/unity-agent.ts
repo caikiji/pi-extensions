@@ -7,14 +7,15 @@
  * 两种模式：
  *   - observe: 截取当前画面 → 送 MiniCPM-V 分析 → 返回文本描述。一次调用，不做操作。
  *   - run_task: 在 Play Mode 中循环 截图→分析→操作 直到任务完成。每步视觉决策走
- *     ollama format schema（强制 JSON），输入注入走 AgentInput（反射操作游戏对象，
+ *     llama.cpp response_format json_schema（强制 JSON），输入注入走 AgentInput（反射操作游戏对象，
  *     不捕获 OS 鼠标键盘）；click 例外回退 Win32 mouse_event。
  * 截图走 PiBridge eval 内联 RenderTexture（不新增 bridge 命令），视觉分析走
- * ollama /api/generate + format schema 强制 JSON。详见：
+ * llama.cpp /v1/chat/completions + response_format json_schema 强制 JSON。详见：
  *   - lib/vision-client.ts
  *   - proposals/2026-07-unity-agent-vision.md → Phase 0 验证报告
+ *   - proposals/2026-07-vision-multiframe-analysis.md → ollama→llama.cpp 迁移
  *
- * 依赖：PiBridge 0.6.0+（eval）+ 本地 ollama + minicpm-v 模型。
+ * 依赖：PiBridge 0.6.0+（eval）+ 本地 llama-server（llama.cpp）+ minicpm-v 模型。
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -64,7 +65,7 @@ export interface UnityAgentResult {
 	projectPath: string;
 	mode: string;
 	bridge: BridgeInfo;
-	/** ollama 视觉服务是否可用 */
+	/** 视觉服务是否可用 */
 	visionAvailable: boolean;
 	visionModel?: string;
 	visionError?: string;
@@ -80,7 +81,7 @@ export interface UnityAgentResult {
 	stepsTaken?: number;
 	/** 总耗时（ms） */
 	totalMs: number;
-	/** 错误信息（bridge 不可用、ollama 不可用、eval 失败等） */
+	/** 错误信息（bridge 不可用、视觉服务不可用、eval 失败等） */
 	error?: string;
 }
 
@@ -119,7 +120,7 @@ export async function runUnityAgent(params: UnityAgentParams, cwd: string): Prom
 		};
 	}
 
-	// 2. 检查 ollama 视觉服务（提前失败比截图后失败好）
+	// 2. 检查视觉服务（提前失败比截图后失败好）
 	const svc = await checkVisionService();
 	if (!svc.ok) {
 		return {
@@ -129,7 +130,7 @@ export async function runUnityAgent(params: UnityAgentParams, cwd: string): Prom
 			visionAvailable: false,
 			visionModel: svc.model,
 			totalMs: Date.now() - totalStart,
-			error: `视觉服务不可用: ${svc.error}\n请确保 ollama 在运行且模型已加载（ollama pull ${svc.model}）。`,
+			error: `视觉服务不可用: ${svc.error}\n请确保 llama-server 在运行并已加载模型（llama-server -m <model.gguf> --mmproj <mmproj.gguf> --port 18080）。`,
 		};
 	}
 
@@ -202,7 +203,7 @@ async function runObserve(
 }
 
 // ─── run_task 模式 ──────────────────────────────────────────────────────
-// 循环：TakeOver 接管（释放 OS 鼠标）→ 每步 截图→decideAction（ollama schema）
+// 循环：TakeOver 接管（释放 OS 鼠标）→ 每步 截图→decideAction（llama.cpp schema）
 //       → 执行 action（AgentInput.Move/Turn/Jump/Interact eval，不碰 OS 输入）
 //       → finally Release 恢复。
 //
@@ -226,8 +227,8 @@ async function runTask(
 ): Promise<UnityAgentResult> {
 	const history: ActionHistory[] = [];
 	// 视觉上下文：全量累积所有历史帧（不截断），让模型有完整记忆。
-	// ollama 有 prompt caching，相同前缀帧命中缓存，全量比滑动窗口更快。
-	// decideAction 传 [...frameHistory, currentFrame]，每步只多编码 1 帧新内容。
+	// llama.cpp prompt caching 能命中稳定前缀，全量累积比滑动窗口更快。
+	// decideAction 传 [...frameHistory, currentFrame]，llama.cpp 保留数组顺序 = 时间序列。
 	const frameHistory: string[] = [];
 	const stepRecords: TaskStepRecord[] = [];
 	// 硬超时：留给每步 ~4s（注入+截图+视觉），加缓冲。最多跑到 maxSteps 或 85s。
@@ -239,7 +240,7 @@ async function runTask(
 	let tookOver = false;
 
 	// 任务结束时调视觉模型总结“我做了什么/为什么完成或未完成”，拼进返回的 analysis。
-	// 传全量历史帧（命中 ollama cache）+ 最后一帧。崩溃场景（bridge 挂了）跳过。
+	// 传全量历史帧 + 最后一帧（llama.cpp 多图顺序感知正确）。崩溃场景（bridge 挂了）跳过。
 	async function summarizeAndReturn(
 		status: "incomplete" | "success" | "stuck",
 		error: string,
@@ -330,7 +331,7 @@ async function runTask(
 
 			// 决策后把当前帧加入视觉历史（全量累积，不截断）。
 			// 下一步 decideAction 拼 [...frameHistory, newCurrentFrame]，
-			// 前缀帧命中 ollama prompt cache，只多编码当前新帧。
+			// llama.cpp prompt cache 命中前缀，只多编码当前新帧。
 			frameHistory.push(capture.base64);
 
 

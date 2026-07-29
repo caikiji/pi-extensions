@@ -3,26 +3,42 @@
  *
  * 提供 unity_agent 工具所需的两个核心能力：
  *   1. captureScreen — 通过 PiBridge eval 内联 RenderTexture 截图，返回 base64 PNG
- *   2. 视觉分析 — 调 ollama MiniCPM-V，支持两种模式：
- *      - askVision: 自由文本描述（observe 模式，用 OpenAI 兼容端点）
- *      - decideAction: 结构化 JSON action 决策（run_task 模式，用 ollama 原生 + format schema）
+ *   2. 视觉分析 — 调 MiniCPM-V，支持两种模式：
+ *      - askVision: 自由文本描述（observe 模式）
+ *      - decideAction: 结构化 JSON action 决策（run_task 模式）
  *
- * 为什么两种端点：
- *   - observe 模式要长文本描述，OpenAI 兼容 /v1/chat/completions 足够且语义清晰
- *   - run_task 的 action 决策要严格 JSON，ollama 原生 /api/generate 的 format 参数
- *     能从语法层面强制 schema（action 枚举、required 字段），实测推理速度还快 5-6 倍
- *     （1.7-2.1s vs prompt 约束的 9-12s）。
+ * 视觉后端：llama.cpp llama-server（OpenAI 兼容 /v1/chat/completions）。
  *
- * Phase 0 验证（2026-07-29）：schema 约束下 JSON 100% 合法 + 字段齐全 + action 不越界。
- * 详见 proposals/2026-07-unity-agent-vision.md → Phase 0 验证报告。
+ * 为什么从 ollama 迁到 llama.cpp（2026-07-30 实测，见
+ * proposals/2026-07-vision-multiframe-analysis.md）：
+ *   - ollama /api/generate 多图丢失顺序语义（模型把多图当无序图集，3 帧以上崩）
+ *   - ollama /v1/chat/completions 多图有 bug：视觉 token 计入 completion_tokens，
+ *     被 max_tokens 截断返回空字符串
+ *   - llama.cpp 用同一套 GGUF，多图顺序感知 8/8 正确，schema 约束 100% 合法
+ *
+ * JSON schema 约束：llama.cpp 的 response_format（OpenAI 标准 json_schema 格式）
+ * 与 ollama format 参数约束力等价（action 枚举、required 字段、key 枚举全部强制）。
+ * Phase 0 验证：schema 约束下 JSON 100% 合法 + 字段齐全 + action 不越界。
+ *
+ * 关键陷阱（minicpmv4.6）：max_tokens 必须 ≥ 512。单图视觉 token 占 80+，
+ * 多图更多，max_tokens 太小会被视觉 token 占满触发 length 截断返回空。
  */
 
 import { sendCommand, type BridgeResponse } from "./bridge-client.ts";
 
 // ─── 配置 ──────────────────────────────────────────────────────────────────
-// ollama 默认跑在 11434。允许环境变量覆盖，方便未来换 llama-server 或其他后端。
-const OLLAMA_BASE_URL = process.env.PI_VISION_BASE_URL ?? "http://127.0.0.1:11434";
-const OLLAMA_MODEL = process.env.PI_VISION_MODEL ?? "minicpm-v4.6:latest";
+// 视觉后端默认指向 llama.cpp llama-server（18080）。
+// 支持环境变量覆盖：PI_VISION_BASE_URL / PI_VISION_MODEL。
+//   - llama.cpp: PI_VISION_BASE_URL=http://127.0.0.1:18080 PI_VISION_MODEL=minicpm-v
+//     （llama.cpp 不校验 model 名，任意值即可）
+//   - 退回 ollama: PI_VISION_BASE_URL=http://127.0.0.1:11434 PI_VISION_MODEL=minicpm-v4.6:latest
+//     注意 ollama 多图不可靠（顺序丢失 + chat 端点空返回），仅作 fallback。
+const VISION_BASE_URL = process.env.PI_VISION_BASE_URL ?? "http://127.0.0.1:18080";
+const VISION_MODEL = process.env.PI_VISION_MODEL ?? "minicpm-v";
+
+/** max_tokens 下限。minicpmv4.6 单图视觉 token ≈ 80+，多图更多，
+ *  max_tokens 太小会被视觉 token 占满触发 length 截断返回空。实测 ≥ 512 安全。 */
+const VISION_MAX_TOKENS = Number(process.env.PI_VISION_MAX_TOKENS ?? 600);
 
 /** 截图尺寸。MiniCPM-V 内部按 384 分块处理，再大无收益反而费带宽。 */
 export const CAPTURE_WIDTH = 384;
@@ -32,7 +48,7 @@ export const CAPTURE_HEIGHT = 384;
 export interface CaptureResult {
 	/** data:image/png;base64,... 形式的 data URL，可直接喂给 vision API */
 	dataUrl: string;
-	/** 不带前缀的纯 base64（ollama 原生 API 用） */
+	/** 不带前缀的纯 base64（decideAction 等多图场景拼 image_url 用） */
 	base64: string;
 	width: number;
 	height: number;
@@ -158,9 +174,9 @@ export async function captureScreen(
  * @param prompt 分析指令，如 "画面上有哪些 UI 元素？"
  */
 export async function askVision(image: string, prompt: string, signal?: AbortSignal): Promise<string> {
-	const url = `${OLLAMA_BASE_URL}/v1/chat/completions`;
+	const url = `${VISION_BASE_URL}/v1/chat/completions`;
 	const body = {
-		model: OLLAMA_MODEL,
+		model: VISION_MODEL,
 		messages: [
 			{
 				role: "user",
@@ -171,6 +187,7 @@ export async function askVision(image: string, prompt: string, signal?: AbortSig
 			},
 		],
 		temperature: 0.3,
+		max_tokens: VISION_MAX_TOKENS,
 	};
 
 	const res = await fetch(url, {
@@ -180,12 +197,12 @@ export async function askVision(image: string, prompt: string, signal?: AbortSig
 		signal,
 	});
 	if (!res.ok) {
-		throw visionError("ollama", `ollama /v1/chat/completions HTTP ${res.status}: ${await res.text()}`);
+		throw visionError("ollama", `视觉服务 /v1/chat/completions HTTP ${res.status}: ${await res.text()}`);
 	}
 	const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
 	const content = json.choices?.[0]?.message?.content;
 	if (!content) {
-		throw visionError("ollama", "ollama 返回的 content 为空");
+		throw visionError("ollama", `视觉服务返回 content 为空（可能 max_tokens 太小被视觉 token 占满）: ${JSON.stringify(json.choices?.[0]).slice(0, 200)}`);
 	}
 	return content;
 }
@@ -193,7 +210,7 @@ export async function askVision(image: string, prompt: string, signal?: AbortSig
 /**
  * 任务结束总结：让视觉模型回顾全部历史帧 + 当前画面，总结
  * “我尝试了什么、当前状态、为什么任务完成/未完成”，作为返回给调用方的摘要。
- * 传全量帧命中 ollama prompt cache（与 decideAction 共享前缀）。
+ * 传全量帧（llama.cpp 多图顺序感知正确，模型能理解时间序列）。
  */
 export async function summarizeTask(
 	recentFrames: string[],
@@ -227,9 +244,9 @@ ${historyText}
 
 用简洁的中文回答，不超过 200 字。`;
 
-	const url = `${OLLAMA_BASE_URL}/v1/chat/completions`;
+	const url = `${VISION_BASE_URL}/v1/chat/completions`;
 	const body = {
-		model: OLLAMA_MODEL,
+		model: VISION_MODEL,
 		messages: [
 			{
 				role: "user",
@@ -239,10 +256,12 @@ ${historyText}
 						image_url: { url: `data:image/png;base64,${b64}` },
 					})),
 					{ type: "text", text: prompt },
-					],
-				},
-			],
+				],
+			},
+		],
 		temperature: 0.3,
+		// 全量历史帧视觉 token 多，max_tokens 给双倍避免被占满截断
+		max_tokens: VISION_MAX_TOKENS * 2,
 	};
 
 	const res = await fetch(url, {
@@ -252,19 +271,19 @@ ${historyText}
 		signal,
 	});
 	if (!res.ok) {
-		throw visionError("ollama", `ollama summarizeTask HTTP ${res.status}: ${await res.text()}`);
+		throw visionError("ollama", `summarizeTask HTTP ${res.status}: ${await res.text()}`);
 	}
 	const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
 	const content = json.choices?.[0]?.message?.content;
 	if (!content) {
-		throw visionError("ollama", "summarizeTask 返回的 content 为空");
+		throw visionError("ollama", `summarizeTask 返回 content 为空（可能 max_tokens 被视觉 token 占满）: ${JSON.stringify(json.choices?.[0]).slice(0, 200)}`);
 	}
 	return content;
 }
 
 //
-// JSON Schema 强制约束。Phase 0 实测：100% 合法 + action 不越界 + 字段齐全 +
-// 推理 1.7-2.1s（比 prompt 约束快 5-6 倍）。
+// JSON Schema 强制约束（llama.cpp response_format json_schema）.
+// Phase 0 + llama.cpp 迁移实测：100% 合法 + action 不越界 + 字段齐全。
 //
 // x/y 加 minimum/maximum，否则模型会输出 x:100 等越界值。
 const ACTION_SCHEMA = {
@@ -315,9 +334,9 @@ export async function decideAction(
 
 	const rules = decisionPrompt ?? "决定下一步动作。";
 
-	// prompt 结构为缓存友好：稳定前缀（任务+规则）→ 尾部追加的历史 → 末尾变化的当前状态。
-	// 这样 ollama prompt 前缀缓存能命中前面所有步骤，每步只多算新增的历史行 + 状态。
-	// 图片数组同理：images=[...历史帧, 当前帧]，前面帧前缀命中。
+	// prompt 结构：稳定前缀（任务+规则）→ 尾部追加的历史 → 末尾变化的当前状态。
+	// llama.cpp prompt 缓存能命中稳定前缀。
+	// 图片数组：images=[...历史帧, 当前帧]（llama.cpp 多图顺序感知正确，模型能理解时间序列）。
 	const prompt = `你是游戏 AI agent，在 Unity Play Mode 中操控角色。
 
 任务目标: ${taskGoal}
@@ -330,30 +349,46 @@ ${historyText}
 当前 agent 状态: ${agentState ?? "(未知)"}`;
 
 
-	const url = `${OLLAMA_BASE_URL}/api/generate`;
+	const url = `${VISION_BASE_URL}/v1/chat/completions`;
 	const t0 = Date.now();
 	const res = await fetch(url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: OLLAMA_MODEL,
-			prompt,
-			images: [...recentFrames, base64],
-			format: ACTION_SCHEMA,
-			stream: false,
-			options: { temperature: 0.2 },
+			model: VISION_MODEL,
+			messages: [
+				{
+					role: "user",
+					content: [
+						// 历史帧 + 当前帧，按时间顺序（llama.cpp 保留数组顺序 = 时间序列）
+						...recentFrames.map((b64) => ({
+							type: "image_url",
+							image_url: { url: `data:image/png;base64,${b64}` },
+						})),
+						{ type: "image_url", image_url: { url: `data:image/png;base64,${base64}` } },
+						{ type: "text", text: prompt },
+					],
+				},
+			],
+			temperature: 0.2,
+			max_tokens: VISION_MAX_TOKENS,
+			// JSON schema 约束（OpenAI 标准 json_schema 格式，与 ollama format 等价）
+			response_format: {
+				type: "json_schema",
+				json_schema: { name: "agent_action", schema: ACTION_SCHEMA, strict: true },
+			},
 		}),
 		signal,
 	});
 	const durationMs = Date.now() - t0;
 
 	if (!res.ok) {
-		throw visionError("ollama", `ollama /api/generate HTTP ${res.status}: ${await res.text()}`);
+		throw visionError("ollama", `视觉服务 /v1/chat/completions HTTP ${res.status}: ${await res.text()}`);
 	}
-	const json = (await res.json()) as { response?: string };
-	const raw = json.response;
+	const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+	const raw = json.choices?.[0]?.message?.content;
 	if (!raw) {
-		throw visionError("ollama", "ollama 返回的 response 为空");
+		throw visionError("ollama", `视觉服务返回 content 为空（可能 max_tokens 被视觉 token 占满）: ${JSON.stringify(json.choices?.[0]).slice(0, 200)}`);
 	}
 
 	let parsed: AgentAction;
@@ -372,20 +407,24 @@ ${historyText}
 }
 
 // ─── 健康检查 ───────────────────────────────────────────────────────────────
-/** 检查 ollama 服务是否可用 + 模型是否已加载。 */
+/** 检查视觉服务是否可用。
+ * llama.cpp: /v1/models 返回模型列表（id 是文件路径）即健康。
+ * ollama: 同样返回 /v1/models。两者端点兼容。 */
 export async function checkVisionService(signal?: AbortSignal): Promise<{ ok: boolean; model: string; error?: string }> {
 	try {
-		const res = await fetch(`${OLLAMA_BASE_URL}/v1/models`, { signal });
+		const res = await fetch(`${VISION_BASE_URL}/v1/models`, { signal });
 		if (!res.ok) {
-			return { ok: false, model: OLLAMA_MODEL, error: `HTTP ${res.status}` };
+			return { ok: false, model: VISION_MODEL, error: `HTTP ${res.status}` };
 		}
 		const json = (await res.json()) as { data?: { id: string }[] };
 		const models = json.data?.map((m) => m.id) ?? [];
-		if (!models.includes(OLLAMA_MODEL)) {
-			return { ok: false, model: OLLAMA_MODEL, error: `模型 ${OLLAMA_MODEL} 未加载。可用模型: ${models.join(", ") || "(无)"}` };
+		if (models.length === 0) {
+			return { ok: false, model: VISION_MODEL, error: `视觉服务返回空模型列表。请确保 llama-server 已启动并加载模型。` };
 		}
-		return { ok: true, model: OLLAMA_MODEL };
+		// llama.cpp 的 model id 是文件路径（如 models/MiniCPM-V-4_6-Q4_K_M.gguf），
+		// ollama 的 id 是模型名。不强校验 model 名匹配，只要返回了模型即认为可用。
+		return { ok: true, model: models[0] ?? VISION_MODEL };
 	} catch (e) {
-		return { ok: false, model: OLLAMA_MODEL, error: `无法连接 ollama (${OLLAMA_BASE_URL}): ${(e as Error).message}` };
+		return { ok: false, model: VISION_MODEL, error: `无法连接视觉服务 (${VISION_BASE_URL}): ${(e as Error).message}` };
 	}
 }
