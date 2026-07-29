@@ -36,8 +36,10 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { discoverBridge, sendCommand, type BridgeInfo, type BridgeResponse } from "../lib/bridge-client.ts";
+import { discoverBridge, sendCommand, waitForBridge, type BridgeInfo, type BridgeResponse } from "../lib/bridge-client.ts";
 import { resolveProjectPath } from "../lib/tool-utils.ts";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 export const BRIDGE_COMMANDS = [
 	"ping",
@@ -93,7 +95,26 @@ export async function runUnityCommand(
 	const projectPath = resolveProjectPath(params.projectPath, cwd);
 
 	// 1. Discover the bridge (reads port file, falls back to probing)
-	const bridge = await discoverBridge(projectPath);
+	let bridge = await discoverBridge(projectPath);
+
+	// 1b. If the bridge isn't up BUT the port file exists, the bridge was recently
+	//   online — most likely a domain reload is in progress (e.g. a preceding
+	//   install/compile/refresh triggered a recompile that's tearing the old
+	//   bridge down and starting a new one). Rather than failing immediately and
+	//   forcing the agent to retry, wait briefly for the bridge to come back.
+	//   If there's no port file at all, Unity isn't open / bridge never installed —
+	//   fail fast with the original helpful message.
+	if (!bridge.available) {
+		const portFile = join(projectPath, "Temp", "pi-bridge-port");
+		if (existsSync(portFile)) {
+			const waited = await waitForBridge(projectPath, {
+				timeoutMs: 25000,
+				signal,
+			});
+			bridge = waited.bridge;
+		}
+	}
+
 	if (!bridge.available) {
 		return {
 			projectPath,
