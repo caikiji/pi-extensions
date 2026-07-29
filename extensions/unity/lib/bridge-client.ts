@@ -282,17 +282,54 @@ export async function waitForCondition(
  */
 export async function waitForBridge(
 	projectPath: string,
-	options: { timeoutMs?: number; intervalMs?: number; stableMs?: number; signal?: AbortSignal } = {},
+	options: {
+		timeoutMs?: number;
+		intervalMs?: number;
+		stableMs?: number;
+		signal?: AbortSignal;
+		/**
+		 * Set when the caller knows a domain reload is about to happen (e.g. just
+		 * wrote new PiBridge.cs and triggered a compile). If the bridge is still
+		 * online at entry, first wait for it to go OFFLINE (confirming the reload
+		 * has actually started) before waiting for it to come back. Without this,
+		 * we'd return immediately on the still-alive pre-reload bridge, only for
+		 * the caller to hit the offline window a moment later.
+		 */
+		expectReload?: boolean;
+	} = {},
 ): Promise<{ bridge: BridgeInfo; waitedMs: number }> {
 	const timeout = options.timeoutMs ?? 45000;
 	const interval = options.intervalMs ?? 700;
 	const stableGap = options.stableMs ?? 600;
+	const expectReload = options.expectReload ?? false;
 	const signal = options.signal;
 	const start = Date.now();
 
 	let last: BridgeInfo = { available: false, reason: "not polled yet" };
 	let consecutiveOk = 0;
 	let lastOkPort: number | undefined;
+
+	// Phase 0 (only if expectReload): if the bridge is still up, wait for it to
+	//   go offline first. This confirms the reload has actually started rather
+	//   than just been requested (Unity's AssetDatabase detection is async and
+	//   can lag behind the file write by seconds). Cap this phase so a reload
+	//   that never comes (Unity not actually open, or no real change detected)
+	//   doesn't consume the whole timeout — we then fall through to waiting
+	//   for online, which will just confirm the still-alive bridge.
+	if (expectReload) {
+		const reloadDeadline = start + Math.min(timeout, 15000);
+		while (Date.now() < reloadDeadline) {
+			if (signal?.aborted) break;
+			const info = await discoverBridge(projectPath);
+			last = info;
+			if (!info.available) break; // reload started — bridge gone
+			await new Promise<void>((r) => {
+				const t = setTimeout(r, interval);
+				signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+			});
+		}
+		consecutiveOk = 0; // whatever we saw, it must now (re)prove itself
+	}
 
 	while (Date.now() - start < timeout) {
 		if (signal?.aborted) break;
