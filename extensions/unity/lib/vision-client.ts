@@ -249,7 +249,7 @@ export async function decideAction(
 	const frameCount = recentFrames.length + 1;
 	const frameDesc = frameCount <= 1
 		? "当前画面见附图（1 帧）。"
-		: `附图是最近 ${frameCount} 帧画面，按时间顺序排列（最早→最近），最后一张是当前画面。通过对比这些帧你可以看出角色的运动轨迹和视角变化，判断之前的动作是否生效、目标是否在移动。`;
+		: `附图是全部历史画面共 ${frameCount} 帧，按时间顺序排列（最早→最近），最后一张是当前画面。通过对比这些帧你可以看出角色的运动轨迹和视角变化，判断之前的动作是否生效、目标是否在移动，记住目标出现过方位。`;
 
 	const prompt = `你是游戏 AI agent。当前在 Unity Play Mode 中运行一个游戏。
 
