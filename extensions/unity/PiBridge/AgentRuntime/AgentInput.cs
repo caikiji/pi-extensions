@@ -98,6 +98,17 @@ namespace PiBridge
         private static bool s_virtualJump;                     // 本帧是否跳（消费后清零）
         private static bool s_virtualInteract;                 // 本帧是否交互（消费后清零）
 
+        // ─── 按键事件模型（press/release，替代 duration 计时器）──────
+        // 每个虚拟键记录是否按下 + 按下时刻（用于最大持续兜底）。
+        // LateUpdate 从按键状态合成 s_virtualMove/s_virtualSprint/s_virtualYawDelta。
+        // 这样 agent 像玩家一样“按住 W 走，松开 W 停”，而非猜 duration_ms。
+        private const float MAX_KEY_HOLD = 5f;          // 单键最大持续秒，防模型忘松手
+        private static bool s_keyW, s_keyA, s_keyS, s_keyD;
+        private static bool s_keyShift;                  // 冲刺
+        private static bool s_keyTurnLeft, s_keyTurnRight;
+        private static double s_keyWTime, s_keyATime, s_keySTime, s_keyDTime;
+        private static double s_keyShiftTime, s_keyTurnLeftTime, s_keyTurnRightTime;
+
         // ─── 持续动作计时器（替代协程）────────────────────────────────
         private static double s_moveEndTime = -1;   // EditorApplication.timeSinceStartup
         private static double s_turnEndTime = -1;
@@ -226,6 +237,10 @@ namespace PiBridge
             s_virtualPitchDelta = 0;
             s_moveEndTime = -1;
             s_turnEndTime = -1;
+            // 清空所有按键状态（防接管结束后角色还在动）
+            s_keyW = s_keyA = s_keyS = s_keyD = false;
+            s_keyShift = false;
+            s_keyTurnLeft = s_keyTurnRight = false;
             if (s_playerController != null)
             {
                 try { s_playerController.enabled = s_playerWasEnabled; } catch { }
@@ -271,17 +286,88 @@ namespace PiBridge
             return "jump";
         }
 
+        // ─── 按键事件 API（press/release，agent 像玩家一样操控）──────────
+        // key 枚举（字符串，eval 传入）：W/A/S/D/Shift/TurnLeft/TurnRight
+        // press 后键持续按下，直到 release 或超过 MAX_KEY_HOLD 自动 release。
+        // LateUpdate 从按键状态合成移动/转向，替代旧的 duration 计时器。
+        public static string PressKey(string key)
+        {
+            double now = Time.realtimeSinceStartup;
+            switch (key)
+            {
+                case "W": s_keyW = true; s_keyWTime = now; break;
+                case "A": s_keyA = true; s_keyATime = now; break;
+                case "S": s_keyS = true; s_keySTime = now; break;
+                case "D": s_keyD = true; s_keyDTime = now; break;
+                case "Shift": s_keyShift = true; s_keyShiftTime = now; break;
+                case "TurnLeft": s_keyTurnLeft = true; s_keyTurnLeftTime = now; break;
+                case "TurnRight": s_keyTurnRight = true; s_keyTurnRightTime = now; break;
+                default: return "unknown key: " + key;
+            }
+            return "pressed " + key;
+        }
+
+        public static string ReleaseKey(string key)
+        {
+            switch (key)
+            {
+                case "W": s_keyW = false; break;
+                case "A": s_keyA = false; break;
+                case "S": s_keyS = false; break;
+                case "D": s_keyD = false; break;
+                case "Shift": s_keyShift = false; break;
+                case "TurnLeft": s_keyTurnLeft = false; break;
+                case "TurnRight": s_keyTurnRight = false; break;
+                default: return "unknown key: " + key;
+            }
+            return "released " + key;
+        }
+
+        // 检查按键是否超过最大持续时间，超时自动 release（防模型忘松手）
+        private static void CheckKeyHoldTimeout()
+        {
+            double now = Time.realtimeSinceStartup;
+            if (s_keyW && now - s_keyWTime > MAX_KEY_HOLD) s_keyW = false;
+            if (s_keyA && now - s_keyATime > MAX_KEY_HOLD) s_keyA = false;
+            if (s_keyS && now - s_keySTime > MAX_KEY_HOLD) s_keyS = false;
+            if (s_keyD && now - s_keyDTime > MAX_KEY_HOLD) s_keyD = false;
+            if (s_keyShift && now - s_keyShiftTime > MAX_KEY_HOLD) s_keyShift = false;
+            if (s_keyTurnLeft && now - s_keyTurnLeftTime > MAX_KEY_HOLD) s_keyTurnLeft = false;
+            if (s_keyTurnRight && now - s_keyTurnRightTime > MAX_KEY_HOLD) s_keyTurnRight = false;
+        }
+
         // ─── 每帧驱动角色（LateUpdate，在游戏 Update 之后）──────────────
         // 游戏 PlayerController 已被禁用，AgentInput 独占 CharacterController.Move。
         private void LateUpdate()
         {
-            // 处理持续动作到期
+            // 按键超时兑底（防模型忘松手）
+            CheckKeyHoldTimeout();
+
+            // ── 从按键状态合成虚拟输入（按键事件模型）──
+            // W/S=前后（z），A/D=左右（x），Shift=冲刺，TurnLeft/TurnRight=转向
+            float mx = 0f, mz = 0f;
+            if (s_keyD) mx += 1f;
+            if (s_keyA) mx -= 1f;
+            if (s_keyW) mz += 1f;
+            if (s_keyS) mz -= 1f;
+            s_virtualMove = new Vector2(mx, mz);
+            s_virtualSprint = s_keyShift;
+            // 转向速度：每秒约 90 度（可调），按住持续转
+            float turnRate = 90f * Time.deltaTime;
+            s_virtualYawDelta = 0f;
+            if (s_keyTurnLeft) s_virtualYawDelta -= turnRate;
+            if (s_keyTurnRight) s_virtualYawDelta += turnRate;
+            s_virtualPitchDelta = 0f;
+
+            // 旧 duration 计时器兑底（向后兼容 Move/Turn API，新代码用 PressKey）
             if (s_moveEndTime > 0 && Time.realtimeSinceStartup >= s_moveEndTime)
             {
-                s_virtualMove = Vector2.zero;
+                // 不覆盖按键合成的输入：只在无按键按下时才清零
+                if (!s_keyW && !s_keyA && !s_keyS && !s_keyD) s_virtualMove = Vector2.zero;
                 s_moveEndTime = -1;
             }
-            if (s_turnEndTime > 0)
+            // 旧 turn 计时器兑底（向后兼容 Turn API）
+            if (s_turnEndTime > 0 && !s_keyTurnLeft && !s_keyTurnRight)
             {
                 if (Time.realtimeSinceStartup < s_turnEndTime)
                 {
