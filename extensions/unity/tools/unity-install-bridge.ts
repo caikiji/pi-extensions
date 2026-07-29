@@ -20,12 +20,12 @@
  * After install, Unity auto-compiles on focus and the bridge starts, after
  * which unity_command becomes usable.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
 import { discoverBridge, sendCommand, waitForBridge } from "../lib/bridge-client.ts";
-import { getGlobalEditorLogPath, readLogByPath } from "../lib/editor-log.ts";
+import { getGlobalEditorLogPath, readLogByPath, tail } from "../lib/editor-log.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -218,14 +218,10 @@ export async function runUnityInstallBridge(
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
 	let compileErrors: string[] = [];
-	// Record Editor.log size before install so we can read only the new
-	// compile output afterwards. Unity's Console gets wiped on domain reload,
-	// but Editor.log persists — that's where compile errors survive.
+	// Editor.log persists across domain reloads (unlike Unity Console, which
+	// gets wiped). We read it after install to detect CS compile errors.
 	const editorLogPath = getGlobalEditorLogPath();
-	let editorLogOffset = 0;
-	if (editorLogPath) {
-		try { const st = statSync(editorLogPath); editorLogOffset = st.size; } catch { /* may not exist yet */ }
-	}
+
 
 	if (unityLikelyOpen) {
 		// Kick off the reload NOW (while the bridge is still up) so the wait
@@ -258,11 +254,13 @@ export async function runUnityInstallBridge(
 			try {
 				await sleep(2000); // give Unity time to flush compile output to Editor.log
 				if (editorLogPath) {
-					const logResult = readLogByPath(editorLogPath);
-					if (logResult.exists && logResult.content.length > editorLogOffset) {
-						const newContent = logResult.content.slice(editorLogOffset);
-						const seen = new Set<string>();
-						for (const line of newContent.split("\n")) {
+						const logResult = readLogByPath(editorLogPath);
+						if (logResult.exists && logResult.content) {
+							// Read the last 100 lines — install-triggered compile output is at the
+							// end. Avoids byte/char offset mismatch on multi-byte UTF-8 logs.
+							const recent = tail(logResult.content, 100);
+							const seen = new Set<string>();
+							for (const line of recent.split("\n")) {
 						// Editor.log paths use double backslashes (Assets\\Editor\\...).
 						// Use a loose match: any line with Assets...error CSxxxx. Capture the
 						// file(line,col): error CSxxxx: description portion.
