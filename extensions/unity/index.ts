@@ -282,15 +282,15 @@ export default function (pi: ExtensionAPI) {
 			"视觉驱动的 Unity Play Mode 测试工具。通过本地 MiniCPM-V 视觉模型“看见”游戏画面。\n" +
 			"两种模式：\n" +
 			"- observe: 截取当前画面并分析，不做操作（已实现）\n" +
-			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成。视觉决策走 ollama schema（强制 JSON），输入注入走 eval 内联 Win32 keybd_event/mouse_event。超时返回 incomplete 可续跑。\n" +
-			"依赖：PiBridge 0.6.0+（eval）+ 本地 ollama + minicpm-v 模型。",
+			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成。视觉决策走 llama.cpp response_format json_schema（强制 JSON），输入注入走 eval 内联 Win32 keybd_event/mouse_event。超时返回 incomplete 可续跑。\n" +
+			"依赖：PiBridge 0.6.0+（eval）+ 本地 llama-server（llama.cpp）+ minicpm-v 模型。",
 		
 		promptSnippet: "让 MiniCPM-V 视觉模型分析 Unity 游戏画面（observe 模式）",
 		promptGuidelines: [
 			"Use unity_agent (mode=observe) to let a vision model (MiniCPM-V) see and analyze the current Unity Game View. Pass the analysis instruction in prompt.",
-			"unity_agent requires a local ollama service with a minicpm-v model loaded. If visionError reports ollama unavailable, start ollama and pull the model first.",
+			"unity_agent requires a local llama-server (llama.cpp) with a minicpm-v model loaded. If visionError reports the vision service unavailable, start llama-server (llama-server -m <model.gguf> --mmproj <mmproj.gguf> --port 18080) first.",
 			"observe mode captures via PiBridge eval (no new bridge command needed). The capture field reports isPlaying — if false, you are seeing the Editor scene view, not the running game. Enter Play Mode via unity_command play first for real gameplay.",
-			"run_task mode (requires Play Mode): loops capture→vision decision→input injection. Each step the model returns {action, params, status, reason} via ollama format schema. Input injection uses Win32 keybd_event/mouse_event (old Input Manager + Windows). Returns incomplete on timeout/crash — resume with a new run_task call (Unity state persists). Check taskStatus field for success/stuck/incomplete/crashed.",
+			"run_task mode (requires Play Mode): loops capture→vision decision→input injection. Each step the model returns {action, params, status, reason} via llama.cpp response_format json_schema. Input injection uses Win32 keybd_event/mouse_event (old Input Manager + Windows). Returns incomplete on timeout/crash — resume with a new run_task call (Unity state persists). Check taskStatus field for success/stuck/incomplete/crashed.",
 			"run_task input actions: move_forward/backward (W/S, params duration_ms), turn_left/right (mouse, params duration_ms), click (params x,y 0~1), interact (E), jump (Space), wait (params duration_ms). The model decides one atomic action per step."
 		],
 		parameters: unityAgentParams,
