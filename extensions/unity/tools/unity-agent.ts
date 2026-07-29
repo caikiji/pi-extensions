@@ -26,7 +26,7 @@ import {
 	captureScreen,
 	checkVisionService,
 	decideAction,
-	type ActionHistory,
+	summarizeTask,
 	type AgentAction,
 	type CaptureResult,
 } from "../lib/vision-client.ts";
@@ -238,6 +238,23 @@ async function runTask(
 	// 知道是否需要 Release（TakeOver 失败则不需要）。
 	let tookOver = false;
 
+	// 任务结束时调视觉模型总结“我做了什么/为什么完成或未完成”，拼进返回的 analysis。
+	// 传全量历史帧（命中 ollama cache）+ 最后一帧。崩溃场景（bridge 挂了）跳过。
+	async function summarizeAndReturn(
+		status: "incomplete" | "success" | "stuck",
+		error: string,
+	): Promise<UnityAgentResult> {
+		let finalSummary: string | undefined;
+		try {
+			// 最后一帧截图供总结（frameHistory 是历史帧，不含当前）
+			const lastCapture = await captureScreen(port);
+			finalSummary = await summarizeTask(frameHistory, lastCapture.base64, prompt, history, status);
+		} catch {
+			// 总结失败不阻塞返回，用步骤流水账作为 fallback
+		}
+		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, status, error, finalSummary);
+	}
+
 	try {
 		// 接管输入：完全接管模式（allowPlayerControl=false），不捕获用户鼠标键盘。
 		// 重试机制：Play Mode 刚进入时场景对象可能未就绪，TakeOver 首次探测会失败，
@@ -312,13 +329,11 @@ async function runTask(
 			// 2. 判断状态
 			if (act.status === "success") {
 				history.push({ action: act.action, result: "任务完成" });
-				return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "success",
-					act.reason, totalStart);
+			return await summarizeAndReturn("success", act.reason);
 			}
 			if (act.status === "stuck") {
 				history.push({ action: act.action, result: "卡住" });
-				return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "stuck",
-					act.reason, totalStart);
+				return await summarizeAndReturn("stuck", act.reason);
 			}
 
 			// 3. 执行 action（AgentInput 版：一次 eval 调用 Move/Turn/Jump/Interact）
@@ -343,8 +358,8 @@ async function runTask(
 		}
 
 		// 跑完 maxSteps 还没 success/stuck
-		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
-			`达到最大步数 ${maxSteps}，任务未完成。可用新的 unity_agent run_task 调用续跑。`, totalStart);
+		return await summarizeAndReturn("incomplete",
+			`达到最大步数 ${maxSteps}，任务未完成。可用新的 unity_agent run_task 调用续跑。`);
 	} finally {
 		// 无论任务如何结束（success/incomplete/crashed/异常），都释放输入控制权，
 		// 恢复游戏 PlayerController + 鼠标状态。这是“不捕获用户鼠标键盘”的关键保障。
@@ -367,6 +382,7 @@ function makeTaskResult(
 	steps: TaskStepRecord[],
 	status: "ongoing" | "incomplete" | "success" | "stuck" | "crashed",
 	error: string,
+	finalSummary?: string,
 	totalStart: number,
 ): UnityAgentResult {
 	const summary = steps.length > 0
@@ -381,7 +397,7 @@ function makeTaskResult(
 		steps,
 		taskStatus: status,
 		stepsTaken: steps.length,
-		analysis: `任务: ${prompt.slice(0, 100)}\n状态: ${status}\n已执行 ${steps.length} 步:\n${summary}\n\n${error}`,
+		analysis: `任务: ${prompt.slice(0, 100)}\n状态: ${status}\n已执行 ${steps.length} 步:\n${summary}${finalSummary ? `\n\n── agent 总结 ──\n${finalSummary}` : ""}\n\n${error}`,
 		totalMs: Date.now() - totalStart,
 		error: status === "success" ? undefined : error,
 	};
