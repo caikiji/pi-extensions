@@ -351,3 +351,47 @@ MiniCPM-V 4.6 准确识别：角色数量/位置（左/右）/朝向（背对/�
 3. **run_task 每步 ~3.2s**（截图 1.2s + 视觉 2s），20 步 ~64s，必须支持 incomplete 续跑
 4. **schema 要给 x/y 加 `minimum:0, maximum:1`**
 5. 实现顺序：vision-client.ts → unity_agent observe → 输入模拟 eval 验证 → run_task 循环
+
+---
+
+## Phase 0.5 发现：视觉模型的局限与 eval 结合策略（2026-07-29）
+
+在 CourseProject（Unity 2019.4.36f1）上深入测试 observe 模式时，发现 MiniCPM-V 4.6 的两个系统性局限，并由此确立了**视觉 + eval 结合**的设计策略。
+
+### 局限 1：颜色识别不准
+
+场景里有一个红色血条（HealthBar，fillColor `RGBA(0.850, 0.200, 0.200, 1.000)`）。反复测试下 MiniCPM-V 均将其识别为“蓝色”（384 和 768 分辨率都如此）。这是模型对暖色/红色的系统性偏差，不是缩放问题。
+
+### 局限 2：384 分辨率下漏 UI
+
+eval 查场场景实际有：2 个 Slider（HealthBar + ProgressBar）、68 个 Image、59 个 Text、2 个 Canvas。但 MiniCPM-V 在 384×384 下不聚焦提问时会说“无 UI”；聚焦后才勉强看到“一个条状物”。左上角血条在 384 下被压成几个像素，细节丢失。
+
+### 策略：视觉判大局，eval 读精确状态
+
+这两个局限指向同一个设计原则——**视觉模型和 eval 各司其职**：
+
+| 能力 | 视觉模型（MiniCPM-V） | eval（Roslyn） |
+|------|---------------------|----------------|
+| 场景类型判断 | ✅ "战斗/探索/对话" | ❌ 需要理解语义 |
+| 角色大概位置/朝向 | ✅ "左侧背对镜头" | ⚠️ 要查 transform |
+| UI 是否存在 | ⚠️ 会漏 | ✅ `FindObjectsOfType<Slider>()` 精确 |
+| 血量数值 | ❌ 看不清 | ✅ 直接读 `Slider.value` |
+| UI 颜色 | ❌ 红的说成蓝 | ✅ 读 `Image.color` |
+| 元素坐标 | ⚠️ 相对坐标不准 | ✅ 读 `RectTransform.anchoredPosition` |
+| "上一步有没有效果" | ✅ 看画面变化 | ⚠️ 要对比状态 |
+
+**run_task 模式应结合两者**：每步视觉判断大局（"我走近目标了吗"），关键状态查询走 eval（"血量还剩多少"）。视觉模型的 action 决策仍可信——它判断的是场景级信息（"该前进了""该转向了"），不依赖精确颜色/数字。
+
+### 输入系统现状（CourseProject）
+
+`ProjectSettings.asset` 确认：`enableNativePlatformBackendsForNewInputSystem: 0`、`disableOldInputManagerSupport: 0`——**旧 Input Manager**，未装 Input System Package。
+
+因此输入模拟走**方案二（Win32 API）**：`keybd_event` / `mouse_event` P/Invoke。方案一（InputSystem.QueueStateEvent）不适用。方案三（AgentInput 脚本）作为后续跨平台兑底。
+
+### 工具能力验证（pi 环境）
+
+`unity_agent observe` 已在 pi 环境端到端跑通：
+- 正确识别 Edit Mode / Play Mode（`○ Edit Mode` / `▶ Play Mode` 标识）
+- 能逐区域精细排查（角落/边缘/头顶/中央）
+- 耗时稳定 3.8-6s
+- `projectPath` 参数必须显式传（cwd 不是 Unity 项目时会报错）
