@@ -323,6 +323,21 @@ namespace PiBridge
             return "released " + key;
         }
 
+        /// <summary>返回当前按下的键（逗号分隔），供 agent 决策时知道哪些键还按着。</summary>
+        public static string GetPressedKeys()
+        {
+            var sb = new System.Text.StringBuilder();
+            if (s_keyW) sb.Append("W,");
+            if (s_keyA) sb.Append("A,");
+            if (s_keyS) sb.Append("S,");
+            if (s_keyD) sb.Append("D,");
+            if (s_keyShift) sb.Append("Shift,");
+            if (s_keyTurnLeft) sb.Append("TurnLeft,");
+            if (s_keyTurnRight) sb.Append("TurnRight,");
+            string s = sb.ToString();
+            return s.Length > 0 ? s.TrimEnd(',') : "(无)";
+        }
+
         // 检查按键是否超过最大持续时间，超时自动 release（防模型忘松手）
         private static void CheckKeyHoldTimeout()
         {
