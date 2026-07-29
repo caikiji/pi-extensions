@@ -197,14 +197,6 @@ export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
 			break;
 		case "turn_right":
-			steps.push({ code: `PiBridge.AgentInput.Move(1f, 0f, ${dur})`, label: `Move right ${dur}ms`, waitMs: dur + 200 });
-			break;
-		case "turn_left":
-			// yaw 负 = 向左转。移动量随 duration 缩放（约 90度/800ms，可调）。
-			// C# float 字面量需 f 后缀，这里 JS 算好数值再拼。
-			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
-			break;
-		case "turn_right":
 			steps.push({ code: `PiBridge.AgentInput.Turn(${(dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn right ${dur}ms`, waitMs: dur + 200 });
 			break;
 		case "interact":
