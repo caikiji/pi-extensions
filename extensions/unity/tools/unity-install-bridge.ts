@@ -200,22 +200,30 @@ export async function runUnityInstallBridge(
 	//   (which would hang/timeout). If Unity isn't open, there's nothing to reload
 	//   — we report bridgeReady:false and tell the caller to open Unity.
 	//
-	//   We only wait if the bridge was online before install (Unity was open) —
-	//   otherwise there's no reload to recover from.
+	//   We treat "Unity is open" as "the bridge port file exists" (bridge was
+	//   installed and started at least once). discoverBridge can transiently
+	//   fail even when the bridge is up (port-file read race, a momentarily
+	//   unresponsive HttpListener under focus-throttle), so we don't rely on it
+	//   alone — if the port file is present we proceed to wait regardless.
 	const preInstall = await discoverBridge(projectPath);
+	const portFileExists = existsSync(join(projectPath, "Temp", "pi-bridge-port"));
+	const unityLikelyOpen = preInstall.available || portFileExists;
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
-	if (preInstall.available) {
+	if (unityLikelyOpen) {
 		// Kick off the reload NOW (while the bridge is still up) so the wait
-			// below reliably sees the offline→online transition. Without this, the
-			// bridge can stay alive for seconds after the file write (Unity's change
-			// detection is async), and waitForBridge would return on the stale
-			// pre-reload bridge — leaving the caller to hit the offline window.
+		// below reliably sees the offline→online transition. Without this, the
+		// bridge can stay alive for seconds after the file write (Unity's change
+		// detection is async, and on some Tuanjie builds never auto-detects at
+		// all), and waitForBridge would return on the stale pre-reload bridge —
+		// leaving the caller to hit the offline window.
+		if (preInstall.available) {
 			try {
 				await sendCommand(preInstall.port!, "compile", {}, 10000);
 			} catch {
 				// ignore — the bridge may already be tearing down, that's fine
 			}
+		}
 		const waited = await waitForBridge(projectPath, { timeoutMs: 60000, expectReload: true });
 		bridgeReady = waited.bridge.available;
 		bridgeWaitMs = waited.waitedMs;
