@@ -104,6 +104,48 @@ export function readLogByPath(filePath: string): LogReadResult {
 	};
 }
 
+/**
+ * Read the portion of a log file appended AFTER the given byte offset.
+ * Used by install-bridge to read only the compile output produced during an
+ * install-triggered recompile (avoiding stale errors from earlier compiles
+ * that are still in the log). Reads raw bytes from byteOffset to EOF, then
+ * decodes as UTF-8 — this is correct even for multi-byte content because we
+ * slice at the byte level, not the string level.
+ *
+ * Returns the decoded tail content plus the new total size (so the caller
+ * can chain calls). If the file shrank (rotated/truncated), returns the full
+ * content from offset 0.
+ */
+export function readLogByPathFromOffset(
+	filePath: string,
+	byteOffset: number,
+): { path: string; content: string; exists: boolean; sizeBytes: number; appendedBytes: number } {
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		const fs = require("node:fs");
+		const fd = fs.openSync(filePath, "r");
+		try {
+			const stat = fstatSync(fd);
+			const total = stat.size;
+			// If the file shrank since the offset was captured (rotation/truncation),
+			// read from the beginning to avoid missing fresh content.
+			const start = byteOffset > 0 && byteOffset <= total ? byteOffset : 0;
+			const len = Math.max(0, total - start);
+			let content = "";
+			if (len > 0) {
+				const buf = Buffer.alloc(len);
+				fs.readSync(fd, buf, 0, len, start);
+				content = buf.toString("utf-8");
+			}
+			return { path: filePath, content, exists: true, sizeBytes: total, appendedBytes: len };
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return { path: filePath, content: "", exists: false, sizeBytes: 0, appendedBytes: 0 };
+	}
+}
+
 import { readProjectVersion } from "./project-version.ts";
 
 /**
