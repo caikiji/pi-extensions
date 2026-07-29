@@ -24,7 +24,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkS
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
-import { discoverBridge, waitForBridge } from "../lib/bridge-client.ts";
+import { discoverBridge, sendCommand, waitForBridge } from "../lib/bridge-client.ts";
 
 export const unityInstallBridgeParams = Type.Object({
 	projectPath: Type.String({
@@ -202,11 +202,21 @@ export async function runUnityInstallBridge(
 	//
 	//   We only wait if the bridge was online before install (Unity was open) —
 	//   otherwise there's no reload to recover from.
-	const bridgeWasOnline = (await discoverBridge(projectPath)).available;
+	const preInstall = await discoverBridge(projectPath);
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
-	if (bridgeWasOnline) {
-		const waited = await waitForBridge(projectPath, { timeoutMs: 45000 });
+	if (preInstall.available) {
+		// Kick off the reload NOW (while the bridge is still up) so the wait
+			// below reliably sees the offline→online transition. Without this, the
+			// bridge can stay alive for seconds after the file write (Unity's change
+			// detection is async), and waitForBridge would return on the stale
+			// pre-reload bridge — leaving the caller to hit the offline window.
+			try {
+				await sendCommand(preInstall.port!, "compile", {}, 10000);
+			} catch {
+				// ignore — the bridge may already be tearing down, that's fine
+			}
+		const waited = await waitForBridge(projectPath, { timeoutMs: 60000, expectReload: true });
 		bridgeReady = waited.bridge.available;
 		bridgeWaitMs = waited.waitedMs;
 		if (bridgeReady) {
