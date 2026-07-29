@@ -362,8 +362,13 @@ async function runTask(
 				}
 			}
 
-			history.push({ action: act.action, result: `执行了 ${steps.map((s) => s.label).join(",")}` });
-		}
+			// 查询当前按下的键，写入历史让模型知道哪些键还按着（避免重复 press）
+			let pressedKeys = "(未知)";
+			try {
+				const pk = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
+				if (pk.ok && typeof pk.result?.value === "string") pressedKeys = pk.result.value;
+			} catch { /* best-effort */ }
+			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 当前按住: ${pressedKeys}` });
 
 		// 跑完 maxSteps 还没 success/stuck
 		return await summarizeAndReturn("incomplete",
