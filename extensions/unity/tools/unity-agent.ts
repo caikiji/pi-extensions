@@ -377,6 +377,7 @@ async function runTask(
 				if (pk.ok && typeof pk.result?.value === "string") pressedKeys = pk.result.value;
 			} catch { /* best-effort */ }
 			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 当前按住: ${pressedKeys}` });
+		}
 
 		// 跑完 maxSteps 还没 success/stuck
 		return await summarizeAndReturn("incomplete",
