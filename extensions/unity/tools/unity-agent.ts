@@ -252,7 +252,7 @@ async function runTask(
 		} catch {
 			// 总结失败不阻塞返回，用步骤流水账作为 fallback
 		}
-		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, status, error, finalSummary);
+		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, status, error, finalSummary, totalStart);
 	}
 
 	try {
