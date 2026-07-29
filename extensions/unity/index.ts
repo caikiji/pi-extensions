@@ -28,10 +28,11 @@ export default function (pi: ExtensionAPI) {
 	// They still participate in LLM context (the agent sees them), but render
 	// with a dim "[unity]" prefix instead of looking like the user typed them.
 	pi.registerMessageRenderer("unity-event", (message, _options, theme) => {
-		const ev = message.details as { event?: string; data?: string } | undefined;
+		const ev = message.details as { event?: string; data?: string; time?: string } | undefined;
 		const name = ev?.event ?? "event";
 		const data = ev?.data && ev.data !== "{}" ? ` ${ev.data}` : "";
-		return new Text(theme.fg("dim", `[unity] ${name}${data}`), 0, 0);
+		const ts = ev?.time ? `${ev.time} ` : "";
+		return new Text(theme.fg("dim", `[unity] ${ts}${name}${data}`), 0, 0);
 	});
 
 	pi.registerTool({
