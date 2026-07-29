@@ -5,7 +5,7 @@
  * playmode_entered/playmode_exited) and continues working. When an event
  * fires inside Unity, PiBridge pushes it down a long-lived /events SSE
  * connection; this module's background loop reads it and calls
- * pi.sendUserMessage() to inject the event into the agent — no polling,
+ * pi.sendMessage() (customType "unity-event") to inject the event into the
  * no blocking wait. This is the pi-unique capability MCP cannot replicate.
  *
  * Lifecycle:
@@ -137,7 +137,7 @@ export async function runUnityEvents(
  * Background SSE loop. Reconnects on disconnect (domain reload, port change,
  * transient error). Exits only when the abort signal fires.
  *
- * On each event, calls pi.sendUserMessage with deliverAs:"followUp" so the
+ * On each event, calls pi.sendMessage (customType "unity-event") with
  * agent is notified without interrupting an in-flight turn (the message
  * queues and triggers a turn once the agent is idle, or immediately if idle).
  */
@@ -189,14 +189,28 @@ async function startSseLoop(pi: ExtensionAPI, projectPath: string, signal: Abort
 					const block = buffer.slice(0, sep);
 					buffer = buffer.slice(sep + 2);
 					const ev = parseSseBlock(block);
-					if (ev) {
-						const dataStr = ev.data && ev.data !== "{}" ? ` ${ev.data}` : "";
-						const msg = `[Unity 事件] ${ev.event}${dataStr}`;
-						try {
-							await pi.sendUserMessage(msg, { deliverAs: "followUp" });
-						} catch {
-							// sendUserMessage failing shouldn't kill the loop.
-						}
+					if (!ev) continue;
+					const dataStr = ev.data && ev.data !== "{}" ? ` ${ev.data}` : "";
+					// Deliver as a custom message (customType: "unity-event") so the TUI
+					// can render it distinctly from user-typed messages (see the
+					// registerMessageRenderer in index.ts). It still participates in
+					// LLM context, so the agent is notified.
+					//
+					// Async-lag note: SSE delivery is realtime, but followUp queues the
+					// message until the agent is idle — so by the time the agent sees
+					// this, the event may already be stale (e.g. the agent may already
+					// have learned about compile completion via unity_status/waitForBridge).
+					// The content flags this so the agent treats it as a hint, not
+					// authoritative state.
+					try {
+						await pi.sendMessage({
+							customType: "unity-event",
+							content: `Unity ${ev.event}${dataStr} (async notification — may lag; verify with unity_status/unity_log if actionable).`,
+							display: true,
+							details: { event: ev.event, data: ev.data },
+						}, { deliverAs: "followUp", triggerTurn: true });
+					} catch {
+						// sendMessage failing shouldn't kill the loop.
 					}
 				}
 			}
