@@ -305,6 +305,7 @@ export async function decideAction(
 	history: ActionHistory[] = [],
 	recentFrames: string[] = [],
 	decisionPrompt?: string,
+	agentState?: string,
 	signal?: AbortSignal,
 ): Promise<{ action: AgentAction; durationMs: number }> {
 	const historyText =
@@ -324,6 +325,9 @@ export async function decideAction(
 任务目标: ${taskGoal}
 
 ${frameDesc}
+
+当前 agent 状态（重要，据此决定下一步）:
+${agentState ?? "(未知)"}
 
 已执行的历史步骤:
 ${historyText}

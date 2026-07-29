@@ -338,6 +338,42 @@ namespace PiBridge
             return s.Length > 0 ? s.TrimEnd(',') : "(无)";
         }
 
+        /// <summary>
+        /// 返回 agent 当前状态 JSON：按住的键、角色位置/朝向、是否接地、平面速度。
+        /// 每步决策前 eval 调用，作为文本注入 prompt（和图片并列），让模型明确当前持续行为。
+        /// </summary>
+        public static string GetAgentState()
+        {
+            ProbeStatic();
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{");
+            // 按住的键
+            sb.Append("\"pressedKeys\":[");
+            bool first = true;
+            if (s_keyW) { if (!first) sb.Append(","); sb.Append("\"W\""); first = false; }
+            if (s_keyA) { if (!first) sb.Append(","); sb.Append("\"A\""); first = false; }
+            if (s_keyS) { if (!first) sb.Append(","); sb.Append("\"S\""); first = false; }
+            if (s_keyD) { if (!first) sb.Append(","); sb.Append("\"D\""); first = false; }
+            if (s_keyShift) { if (!first) sb.Append(","); sb.Append("\"Shift\""); first = false; }
+            if (s_keyTurnLeft) { if (!first) sb.Append(","); sb.Append("\"TurnLeft\""); first = false; }
+            if (s_keyTurnRight) { if (!first) sb.Append(","); sb.Append("\"TurnRight\""); first = false; }
+            sb.Append("]");
+            // 角色状态
+            if (s_playerController != null)
+            {
+                var pos = s_playerController.transform.position;
+                var fwd = s_playerController.transform.forward;
+                sb.Append(",\"pos\":{").Append($"\"x\":{pos.x:F1},\"y\":{pos.y:F1},\"z\":{pos.z:F1}}");
+                sb.Append(",\"forward\":{").Append($"\"x\":{fwd.x:F2},\"z\":{fwd.z:F2}}");
+                var t = s_playerController.GetType();
+                try { var p = t.GetProperty("IsGrounded"); if (p != null) sb.Append(",\"grounded\":").Append((bool)p.GetValue(s_playerController)); } catch { }
+                try { var p = t.GetProperty("CurrentPlanarSpeed"); if (p != null) sb.Append(",\"speed\":").Append(((float)p.GetValue(s_playerController)).ToString("F1")); } catch { }
+            }
+            sb.Append(",\"takeover\":").Append(s_takeover ? "true" : "false");
+            sb.Append("}");
+            return sb.ToString();
+        }
+
         // 检查按键是否超过最大持续时间，超时自动 release（防模型忘松手）
         private static void CheckKeyHoldTimeout()
         {
