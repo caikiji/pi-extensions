@@ -326,13 +326,13 @@ export async function decideAction(
 
 ${frameDesc}
 
-当前 agent 状态（重要，据此决定下一步）:
-${agentState ?? "(未知)"}
-
 已执行的历史步骤:
 ${historyText}
 
-${rules}`;
+${rules}
+
+当前 agent 状态（据此决定下一步，注意 pressedKeys 里的是还按着的键）:
+${agentState ?? "(未知)"}`;
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
