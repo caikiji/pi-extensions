@@ -134,6 +134,8 @@ namespace PiBridge
         private static MonoBehaviour s_followCamera;           // 有 yaw/pitch 字段的脚本
         private static FieldInfo s_yawField;
         private static FieldInfo s_pitchField;
+        private static float s_fixedPitch;                    // 接管时记录的纵向角度，固定不变
+        private static float s_cameraYawSmoothVel;            // 相机 yaw 平滑速度
         private static Type s_inputLockType;
         private static PropertyInfo s_inputLockUiOpenProp;
         private static bool s_playerWasEnabled;                // TakeOver 前的 enabled，Release 恢复
@@ -219,6 +221,12 @@ namespace PiBridge
                 Cursor.visible = true;
                 // 同时尝试设 InputLock.UiOpen=true（双保险：让游戏自己的输入逻辑也停）。
                 TrySetInputLockUiOpen(true);
+                // 记录当前相机 pitch 作为固定纵向角度（接管期间不变），
+                // yaw 改为跟随角色朝向（水平跟随），这样 WASD 就能完整操控。
+                if (s_followCamera != null && s_pitchField != null)
+                {
+                    try { s_fixedPitch = (float)s_pitchField.GetValue(s_followCamera); } catch { }
+                }
             }
             return "took over input: playerController=" + (s_playerController != null)
                 + " charController=" + (s_charController != null)
@@ -505,22 +513,22 @@ namespace PiBridge
                 try { if (s_isGroundedProp != null) s_isGroundedProp.SetValue(s_playerController, s_charController.isGrounded); } catch { }
             }
 
-            // 相机旋转覆盖（如果有 followCamera 的 yaw/pitch 字段）
-            if (s_followCamera != null && s_yawField != null)
+            // 相机水平跟随角色：yaw 平滑跟随角色朝向，pitch 固定（接管时记录的值）。
+            // 这样 agent 只用 WASD 操控角色，相机自动跟在身后，无需拖动视角。
+            // TurnLeft/TurnRight 不再直接改相机（s_virtualYawDelta 不用），角色转向靠移动方向驱动。
+            if (s_followCamera != null && s_yawField != null && s_playerController != null)
             {
                 try
                 {
-                    float yaw = (float)s_yawField.GetValue(s_followCamera);
-                    s_yawField.SetValue(s_followCamera, yaw + s_virtualYawDelta);
+                    float targetYaw = s_playerController.transform.eulerAngles.y;
+                    float curYaw = (float)s_yawField.GetValue(s_followCamera);
+                    float smoothYaw = Mathf.SmoothDampAngle(curYaw, targetYaw, ref s_cameraYawSmoothVel, 0.1f);
+                    s_yawField.SetValue(s_followCamera, smoothYaw);
                 } catch { }
             }
             if (s_followCamera != null && s_pitchField != null)
             {
-                try
-                {
-                    float pitch = (float)s_pitchField.GetValue(s_followCamera);
-                    s_pitchField.SetValue(s_followCamera, pitch + s_virtualPitchDelta);
-                } catch { }
+                try { s_pitchField.SetValue(s_followCamera, s_fixedPitch); } catch { }
             }
 
             // 跳跃/交互：旧 Input Manager 无法注入 GetKeyDown，仅清零标记。
