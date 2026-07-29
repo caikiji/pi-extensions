@@ -137,11 +137,11 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
 			steps.push({ code: keyEventCode(VK.s, false), label: "S keyup", waitMs: 200 });
 			break;
 		case "turn_left":
-			// 鼠标左移 → FollowCamera 的 yaw 减小（向左转）
-			steps.push({ code: mouseMoveCode(-300, 0), label: "mouse left", waitMs: 300 });
+			// 鼠标左移 → FollowCamera 的 yaw 减小（向左转）。移动量随 duration_ms 缩放。
+			steps.push({ code: mouseMoveCode(-Math.round(dur * 1.5), 0), label: `mouse left ${dur}ms`, waitMs: 300 });
 			break;
 		case "turn_right":
-			steps.push({ code: mouseMoveCode(300, 0), label: "mouse right", waitMs: 300 });
+			steps.push({ code: mouseMoveCode(Math.round(dur * 1.5), 0), label: `mouse right ${dur}ms`, waitMs: 300 });
 			break;
 		case "click":
 			steps.push({
