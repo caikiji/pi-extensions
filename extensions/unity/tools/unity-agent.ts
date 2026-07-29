@@ -225,6 +225,10 @@ async function runTask(
 	totalStart: number,
 ): Promise<UnityAgentResult> {
 	const history: ActionHistory[] = [];
+	// 视觉上下文：保留最近 8 帧截图（滑动窗口），让模型看到运动轨迹/视角变化，
+	// 而非每步只看孤立的当前帧。decideAction 传 [...recentFrames, currentFrame]。
+	const frameHistory: string[] = [];
+	const MAX_FRAMES = 8;
 	const stepRecords: TaskStepRecord[] = [];
 	// 硬超时：留给每步 ~4s（注入+截图+视觉），加缓冲。最多跑到 maxSteps 或 85s。
 	const HARD_TIMEOUT_MS = 85000;
@@ -284,11 +288,17 @@ async function runTask(
 			// 视觉决策
 			let decision: { action: AgentAction; durationMs: number };
 			try {
-				decision = await decideAction(capture.base64, prompt, history);
+				decision = await decideAction(capture.base64, prompt, history, frameHistory);
 			} catch (e) {
 				return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
 					`视觉决策失败（第 ${step} 步）: ${(e as Error).message}`, totalStart);
 			}
+
+			// 决策后把当前帧加入视觉历史滑动窗口（保留最近 MAX_FRAMES-1 帧，
+			// 下一步 decideAction 会拼 [...frameHistory, newCurrentFrame] 共最多 MAX_FRAMES 帧）
+			frameHistory.push(capture.base64);
+			while (frameHistory.length > MAX_FRAMES - 1) frameHistory.shift();
+
 
 			const act = decision.action;
 			stepRecords.push({
