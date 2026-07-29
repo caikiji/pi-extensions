@@ -330,21 +330,24 @@ ${historyText}
     W=前进, S=后退, A=左移, D=右移, Shift=冲刺(需配合 WASD),
     TurnLeft=向左转视角, TurnRight=向右转视角
 - release: 松开一个键停止该动作，params.key 同上
-  **操控模型**：像玩家一样按键。例：要前进就 press W，看到快到了就 release W。
-  要转向就 press TurnLeft，转够了就 release TurnLeft。不要用 duration，靠 press/release 控制。
 - interact: 交互（E 键），params 留空 {}
 - jump: 跳跃（空格），params 留空 {}
-- wait: 等待观察，params 留空 {}
-- **重要**：如果任务目标不在当前画面中（看不到目标），必须先 press TurnLeft 或 TurnRight
-  四处环顾寻找目标，找到后再 release 转向键 + press W 靠近。不要在看不到目标时一直 press W。
-- **status 判断很重要**:
-  - 如果当前画面已经满足任务目标（或已明显达成），必须返回 status=success
-  - 如果任务无法推进（卡住、无法判断），返回 status=stuck
-  - 否则返回 status=ongoing
-- 不要过度执行：任务达成后立即 success，不要继续动作
-- **按键管理**：按下的键会持续生效直到 release。如果之前 press 了 W 还没 release，
-  角色还在走——要么继续走，要么 release W 停下。不要重复 press 同一个键。
-- 每步最多持续约 2 秒（模型推理时间），单键按住超过 5 秒会自动 release 兑底。`
+- wait: 纯等待观察（不动），params 留空 {}
+
+**操控模型（重要）**：像玩家一样按键。例：要前进就 press W，看到快到了就 release W。
+要转向就 press TurnLeft，转够了就 release TurnLeft。不猜时长，靠 press/release 控制。
+典型序列：press W（开始走）→ 几步后 release W（停下）→ press TurnLeft（转身找路）→ release TurnLeft。
+
+**必须主动移动**：任务要求移动时必须用 press WASD，不要一直 wait。
+wait 只用于需要停下来观察画面的场景，不要连续多步 wait。
+如果任务目标不在当前画面中（看不到目标），必须先 press TurnLeft 或 TurnRight 四处环顾寻找，
+找到后 release 转向键 + press W 靠近。
+
+- **按键管理**：按下的键持续生效直到 release。之前 press 了 W 还没 release，角色还在走——
+  要么继续走，要么 release W 停下。不要重复 press 同一个已按下的键。
+- **status 判断**：画面已满足任务目标→success；无法推进→stuck；否则 ongoing。
+  任务达成后立即 success，不要继续动作。
+- 每步约持续 2 秒（推理时间），单键超 5 秒自动 release 兑底。`
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
