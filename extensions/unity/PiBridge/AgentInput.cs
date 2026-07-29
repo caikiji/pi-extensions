@@ -74,18 +74,21 @@ namespace PiBridge
         private bool _virtualJump;                     // 本帧是否跳（消费后清零）
         private bool _virtualInteract;                 // 本帧是否交互（消费后清零）
 
-        // ─── 探测到的游戏结构（首次 TakeOver 时探测）─────────────────
-        private bool _probed;
-        private MonoBehaviour _playerController;       // 有 moveInput 字段的脚本
-        private FieldInfo _moveInputField;
-        private FieldInfo _sprintField;
-        private MonoBehaviour _followCamera;           // 有 yaw/pitch 字段的脚本
-        private FieldInfo _yawField;
-        private FieldInfo _pitchField;
-        private Type _inputLockType;
-        private PropertyInfo _inputLockUiOpenProp;
+        // ─── 探测到的游戏结构（首次 TakeOver/Describe 时探测）────────
+        // 用 static 字段：Describe 在 Edit Mode 也能纯静态探测，不需要
+        // MonoBehaviour 实例（AgentInput 在 Editor 文件夹下是 Editor 脚本，
+        // Edit Mode 无法 AddComponent）。Play Mode 下 LateUpdate 读这些 static 字段。
+        private static bool s_probed;
+        private static MonoBehaviour s_playerController;       // 有 moveInput 字段的脚本
+        private static FieldInfo s_moveInputField;
+        private static FieldInfo s_sprintField;
+        private static MonoBehaviour s_followCamera;           // 有 yaw/pitch 字段的脚本
+        private static FieldInfo s_yawField;
+        private static FieldInfo s_pitchField;
+        private static Type s_inputLockType;
+        private static PropertyInfo s_inputLockUiOpenProp;
 
-        /// <summary>探测游戏结构。返回 JSON 描述支持的能力。</summary>
+        /// <summary>探测游戏结构。返回 JSON 描述支持的能力。Edit Mode 安全（纯静态探测）。</summary>
         public static string Describe()
         {
             ProbeStatic();
@@ -93,25 +96,25 @@ namespace PiBridge
             sb.Append("{");
             sb.Append("\"takeover\":").Append((_instance != null && _instance._takeover) ? "true" : "false").Append(",");
             sb.Append("\"playerController\":");
-            if (inst._playerController != null)
+            if (s_playerController != null)
             {
-                sb.Append("{\"found\":true,\"type\":\"").Append(inst._playerController.GetType().FullName).Append("\"");
-                sb.Append(",\"moveInput\":\"").Append(inst._moveInputField?.Name ?? "null").Append("\"");
-                sb.Append(",\"sprint\":\"").Append(inst._sprintField?.Name ?? "null").Append("\"}");
+                sb.Append("{\"found\":true,\"type\":\"").Append(s_playerController.GetType().FullName).Append("\"");
+                sb.Append(",\"moveInput\":\"").Append(s_moveInputField?.Name ?? "null").Append("\"");
+                sb.Append(",\"sprint\":\"").Append(s_sprintField?.Name ?? "null").Append("\"}");
             }
             else sb.Append("{\"found\":false}");
             sb.Append(",\"followCamera\":");
-            if (inst._followCamera != null)
+            if (s_followCamera != null)
             {
-                sb.Append("{\"found\":true,\"type\":\"").Append(inst._followCamera.GetType().FullName).Append("\"");
-                sb.Append(",\"yaw\":\"").Append(inst._yawField?.Name ?? "null").Append("\"");
-                sb.Append(",\"pitch\":\"").Append(inst._pitchField?.Name ?? "null").Append("\"}");
+                sb.Append("{\"found\":true,\"type\":\"").Append(s_followCamera.GetType().FullName).Append("\"");
+                sb.Append(",\"yaw\":\"").Append(s_yawField?.Name ?? "null").Append("\"");
+                sb.Append(",\"pitch\":\"").Append(s_pitchField?.Name ?? "null").Append("\"}");
             }
             else sb.Append("{\"found\":false}");
             sb.Append(",\"inputLock\":");
-            if (inst._inputLockType != null)
+            if (s_inputLockType != null)
             {
-                sb.Append("{\"found\":true,\"type\":\"").Append(inst._inputLockType.FullName).Append("\"}");
+                sb.Append("{\"found\":true,\"type\":\"").Append(s_inputLockType.FullName).Append("\"}");
             }
             else sb.Append("{\"found\":false}");
             sb.Append(",\"actions\":[\"move_forward\",\"move_backward\",\"move_left\",\"move_right\",\"turn_left\",\"turn_right\",\"interact\",\"jump\",\"wait\"]");
@@ -122,9 +125,10 @@ namespace PiBridge
         /// <summary>开始接管输入。之后游戏读取到的输入由 AgentInput 提供。</summary>
         public static string TakeOver()
         {
-            Instance.Probe();
-            Instance._takeover = true;
-            return "took over input: " + (Instance._playerController != null || Instance._followCamera != null);
+            ProbeStatic();
+            var inst = Instance;  // 需要 MonoBehaviour 实例来跑 LateUpdate/协程
+            inst._takeover = true;
+            return "took over input: " + (s_playerController != null || s_followCamera != null);
         }
 
         /// <summary>释放输入，恢复游戏读取真实 Input。</summary>
@@ -201,30 +205,30 @@ namespace PiBridge
             if (!_takeover) return;
 
             // 覆盖移动输入
-            if (_playerController != null && _moveInputField != null)
+            if (s_playerController != null && s_moveInputField != null)
             {
-                try { _moveInputField.SetValue(_playerController, _virtualMove); } catch { }
+                try { s_moveInputField.SetValue(s_playerController, _virtualMove); } catch { }
             }
-            if (_sprintField != null && _playerController != null)
+            if (s_sprintField != null && s_playerController != null)
             {
-                try { _sprintField.SetValue(_playerController, _virtualSprint); } catch { }
+                try { s_sprintField.SetValue(s_playerController, _virtualSprint); } catch { }
             }
 
             // 覆盖相机旋转
-            if (_followCamera != null && _yawField != null)
+            if (s_followCamera != null && s_yawField != null)
             {
                 try
                 {
-                    float yaw = (float)_yawField.GetValue(_followCamera);
-                    _yawField.SetValue(_followCamera, yaw + _virtualYawDelta);
+                    float yaw = (float)s_yawField.GetValue(s_followCamera);
+                    s_yawField.SetValue(s_followCamera, yaw + _virtualYawDelta);
                 } catch { }
             }
-            if (_followCamera != null && _pitchField != null)
+            if (s_followCamera != null && s_pitchField != null)
             {
                 try
                 {
-                    float pitch = (float)_pitchField.GetValue(_followCamera);
-                    _pitchField.SetValue(_followCamera, pitch + _virtualPitchDelta);
+                    float pitch = (float)s_pitchField.GetValue(s_followCamera);
+                    s_pitchField.SetValue(s_followCamera, pitch + _virtualPitchDelta);
                 } catch { }
             }
 
@@ -236,14 +240,20 @@ namespace PiBridge
             if (_virtualInteract) _virtualInteract = false;
         }
 
-        // ─── 反射探测游戏结构 ──────────────────────────────────────────
+        // ─── 反射探测游戏结构（静态，Edit Mode 安全）──────────────────
         // 扫描场景里的 MonoBehaviour，按命名约定找输入字段。
-        private void Probe()
+        // 用 static 字段存结果，Describe/TakeOver/LateUpdate 共享。
+        // Edit Mode 下 FindObjectsOfType 能返回场景对象（不依赖 Play Mode），
+        // 但注意：Edit Mode 下场景必须已在 Hierarchy 打开，且某些游戏对象可能未初始化。
+        private static void ProbeStatic()
         {
-            if (_probed) return;
-            _probed = true;
+            if (s_probed) return;
+            s_probed = true;
 
-            var allMono = FindObjectsOfType<MonoBehaviour>();
+            MonoBehaviour[] allMono;
+            try { allMono = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(); }
+            catch { return; }  // Edit Mode 下可能抛异常，安全退出
+            if (allMono == null) return;
             foreach (var mb in allMono)
             {
                 try
@@ -251,30 +261,30 @@ namespace PiBridge
                     if (mb == null) continue;
                     var t = mb.GetType();
 
-                // 找 player controller：有 moveInput 字段（Vector2）
-                if (_playerController == null)
-                {
-                    var f = t.GetField("moveInput", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    if (f != null && f.FieldType == typeof(Vector2))
+                    // 找 player controller：有 moveInput 字段（Vector2）
+                    if (s_playerController == null)
                     {
-                        _playerController = mb;
-                        _moveInputField = f;
-                        // 顺便找 sprint 字段
-                        _sprintField = t.GetField("sprintHeld", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var f = t.GetField("moveInput", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        if (f != null && f.FieldType == typeof(Vector2))
+                        {
+                            s_playerController = mb;
+                            s_moveInputField = f;
+                            // 顺便找 sprint 字段
+                            s_sprintField = t.GetField("sprintHeld", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        }
                     }
-                }
 
-                // 找 follow camera：有 yaw 字段（float）
-                if (_followCamera == null)
-                {
-                    var yawF = t.GetField("yaw", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    if (yawF != null && yawF.FieldType == typeof(float))
+                    // 找 follow camera：有 yaw 字段（float）
+                    if (s_followCamera == null)
                     {
-                        _followCamera = mb;
-                        _yawField = yawF;
-                        _pitchField = t.GetField("pitch", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var yawF = t.GetField("yaw", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        if (yawF != null && yawF.FieldType == typeof(float))
+                        {
+                            s_followCamera = mb;
+                            s_yawField = yawF;
+                            s_pitchField = t.GetField("pitch", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        }
                     }
-                }
                 }
                 catch { /* mb may be a destroyed Unity object; skip */ }
             }
@@ -287,14 +297,14 @@ namespace PiBridge
                     {
                         if (t.Name == "InputLock" && t.IsClass && t.IsAbstract) // static class
                         {
-                            _inputLockType = t;
-                            _inputLockUiOpenProp = t.GetProperty("UiOpen", BindingFlags.Public | BindingFlags.Static);
+                            s_inputLockType = t;
+                            s_inputLockUiOpenProp = t.GetProperty("UiOpen", BindingFlags.Public | BindingFlags.Static);
                             break;
                         }
                     }
                 }
                 catch { }
-                if (_inputLockType != null) break;
+                if (s_inputLockType != null) break;
             }
         }
     }

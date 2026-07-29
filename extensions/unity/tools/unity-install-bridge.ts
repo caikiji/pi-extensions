@@ -25,7 +25,7 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
 import { discoverBridge, sendCommand, waitForBridge } from "../lib/bridge-client.ts";
-import { getGlobalEditorLogPath, readLogByPath, tail } from "../lib/editor-log.ts";
+import { getGlobalEditorLogPath, readLogByPath, readLogByPathFromOffset } from "../lib/editor-log.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -220,7 +220,31 @@ export async function runUnityInstallBridge(
 	let compileErrors: string[] = [];
 	// Editor.log persists across domain reloads (unlike Unity Console, which
 	// gets wiped). We read it after install to detect CS compile errors.
+	// IMPORTANT: read only the bytes APPENDED after install, not tail(N) lines —
+	// Unity writes a flood of RefreshProfiler lines AFTER compile, so the last
+	// 100 lines are usually refresh spam and the CS errors (which happened
+	// earlier, during compile) have already scrolled out of a small tail window.
+	// Worse, Editor.log retains errors from PREVIOUS installs, so a larger tail
+	// would report stale errors as if they were new. Byte-offset slicing reads
+	// exactly the new compile output, multi-byte safe (slices bytes, not chars).
 	const editorLogPath = getGlobalEditorLogPath();
+	let editorLogOffset = 0;
+	if (editorLogPath) {
+		const pre = readLogByPath(editorLogPath);
+		if (pre.exists) editorLogOffset = pre.sizeBytes;
+	}
+	// Also snapshot the bridge's startedAt (if the running bridge supports it)
+	// so we can verify after install that the bridge actually restarted with the
+	// new code, not stale code from a failed compile. startedAt is a UTC ticks
+	// string; if absent (old bridge), we fall back to "unknown".
+	let preStartedAt: string | null = null;
+	if (preInstall.available) {
+		try {
+			const pingRes = await sendCommand<{ startedAt?: string }>(preInstall.port!, "ping", {}, 8000);
+			const sa = pingRes?.result?.startedAt;
+			if (typeof sa === "string") preStartedAt = sa;
+		} catch { /* bridge may be mid-teardown; non-fatal */ }
+	}
 
 
 	if (unityLikelyOpen) {
@@ -249,39 +273,61 @@ export async function runUnityInstallBridge(
 			// Check for compile errors via Editor.log (NOT Unity Console — domain
 			// reload wipes the Console, hiding CS errors that happened during
 			// compile). Editor.log persists across reloads. We read only the bytes
-			// appended after install started (editorLogOffset) to avoid stale errors
-			// from previous compiles.
+			// APPENDED after install started (editorLogOffset) to avoid stale
+			// errors from previous compiles — see the comment above where the
+			// offset is captured. tail(N lines) does NOT work here because Unity
+			// writes a large block of RefreshProfiler lines AFTER compile, pushing
+			// the CS errors out of a small tail window.
+			let postStartedAt: string | null = null;
 			try {
 				await sleep(2000); // give Unity time to flush compile output to Editor.log
 				if (editorLogPath) {
-						const logResult = readLogByPath(editorLogPath);
-						if (logResult.exists && logResult.content) {
-							// Read the last 100 lines — install-triggered compile output is at the
-							// end. Avoids byte/char offset mismatch on multi-byte UTF-8 logs.
-							const recent = tail(logResult.content, 100);
-							const seen = new Set<string>();
-							for (const line of recent.split("\n")) {
-						// Editor.log paths use double backslashes (Assets\\Editor\\...).
-						// Use a loose match: any line with Assets...error CSxxxx. Capture the
-						// file(line,col): error CSxxxx: description portion.
-						const m = line.match(/(Assets.*error CS\d{4}:.*)/);
+					const appended = readLogByPathFromOffset(editorLogPath, editorLogOffset);
+					if (appended.exists && appended.content) {
+						const seen = new Set<string>();
+						for (const line of appended.content.split("\n")) {
+							// Editor.log paths use double backslashes (Assets\\Editor\\...).
+							// Use a loose match: any line with Assets...error CSxxxx. Capture
+							// the file(line,col): error CSxxxx: description portion.
+							const m = line.match(/(Assets.*error CS\d{4}:.*)/);
 							if (m && !seen.has(m[1])) {
 								seen.add(m[1]);
 								compileErrors.push(m[1]);
 							}
 						}
 					}
-					if (compileErrors.length > 0) {
-						nextSteps.push(
-							`⚠ ${compileErrors.length} compile error(s) detected! The new PiBridge.cs did NOT compile — bridge is running STALE code from the previous build.`,
-						);
-						for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  ✗ ${e}`);
-						if (compileErrors.length > 5) nextSteps.push(`  ... and ${compileErrors.length - 5} more`);
-						nextSteps.push("Fix the errors and reinstall. Do NOT trust unity_command until compile succeeds — it's running old code.");
-					}
 				}
+				// Verify the bridge actually restarted with the new code by comparing
+				// startedAt before vs after. If startedAt is unchanged (or absent on
+				// one side), the bridge is running STALE code — typically because the
+				// new PiBridge.cs failed to compile (the CS error check above should
+				// catch the cause). This is a stronger signal than "bridge online",
+				// which is true even when running the last-good build.
+				try {
+				const pingRes = await sendCommand<{ startedAt?: string }>(waited.bridge.port!, "ping", {}, 8000);
+				const sa = pingRes?.result?.startedAt;
+					if (typeof sa === "string") postStartedAt = sa;
+				} catch { /* non-fatal */ }
 			} catch {
 				// Editor.log read failed — non-fatal, bridge is still usable
+			}
+			const staleBridge =
+				preStartedAt !== null && postStartedAt !== null && preStartedAt === postStartedAt;
+			if (compileErrors.length > 0) {
+				nextSteps.push(
+					`⚠ ${compileErrors.length} compile error(s) detected! The new PiBridge.cs did NOT compile — bridge is running STALE code from the previous build.`,
+				);
+				for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  ✗ ${e}`);
+				if (compileErrors.length > 5) nextSteps.push(`  ... and ${compileErrors.length - 5} more`);
+				nextSteps.push("Fix the errors and reinstall. Do NOT trust unity_command until compile succeeds — it's running old code.");
+			} else if (staleBridge) {
+				nextSteps.push(
+					`⚠ No compile errors in the new Editor.log output, but the bridge's startedAt timestamp did NOT change after install (was ${preStartedAt}, still ${postStartedAt}). This means the bridge is still running the PREVIOUS build — the recompile either didn't trigger or the new assembly failed to load. Focus Unity to force a recompile, then reinstall.`,
+				);
+			} else if (preStartedAt !== null && postStartedAt !== null) {
+				nextSteps.push(
+					`✓ Bridge restarted with new code (startedAt: ${preStartedAt} → ${postStartedAt}).`,
+				);
 			}
 		} else {
 			nextSteps.push(
