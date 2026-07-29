@@ -676,6 +676,57 @@ namespace PiBridge
             Cursor.visible = true;
         }
 
+        // ─── 决策 prompt 模板（项目可自定义）──────────────────────────
+        // vision agent 每步决策时调 GetDecisionPrompt() 取回此模板，拼接
+        // taskGoal/历史/帧描述。项目可调 SetDecisionPrompt 自定义（如换语言、
+        // 加项目特定动作说明），改了无需 reload pi 扩展。存 EditorPrefs 跨域 reload 持久。
+        private static string s_decisionPrompt;
+        private const string DECISION_PROMPT_KEY = "PiBridge.AgentInput.DecisionPrompt";
+        private const string DEFAULT_DECISION_PROMPT = @"当前画面见附图。决定下一步动作。规则:
+- 每步只选一个原始动作，不能组合
+- press: 按住一个键开始持续动作，params.key 指定键：
+    W=前进, S=后退, A=左移, D=右移, Shift=冲刺(需配合 WASD),
+    TurnLeft=向左转视角, TurnRight=向右转视角
+- release: 松开一个键停止该动作，params.key 同上
+- interact: 交互（E 键），params 留空 {}
+- jump: 跳跃（空格），params 留空 {}
+- wait: 纯等待观察（不动），params 留空 {}
+
+**操控模型（重要）**：像玩家一样按键。例：要前进就 press W，看到快到了就 release W。
+要转向就 press TurnLeft，转够了就 release TurnLeft。不猜时长，靠 press/release 控制。
+典型序列：press W（开始走）→ 几步后 release W（停下）→ press TurnLeft（转身找路）→ release TurnLeft。
+
+**必须主动移动**：任务要求移动时必须用 press WASD，不要一直 wait。
+wait 只用于需要停下来观察画面的场景，不要连续多步 wait。
+如果任务目标不在当前画面中（看不到目标），必须先 press TurnLeft 或 TurnRight 四处环顾寻找，
+找到后 release 转向键 + press W 靠近。
+
+- **按键管理**：按下的键持续生效直到 release。之前 press 了 W 还没 release，角色还在走——
+  要么继续走，要么 release W 停下。不要重复 press 同一个已按下的键。
+- **status 判断**：
+  - 画面已明显满足任务目标 → success
+  - 连续多步尝试后仍毫无进展（角色没动/反复撞墙）→ stuck
+  - 其他情况 → ongoing（首步必须是 ongoing，不要一上来就 stuck）
+  任务达成后立即 success，不要继续动作。
+  **不要轻易放弃**：只要还有可能推进，就返回 ongoing 并执行动作，不要 stuck。
+- 每步约持续 2 秒（推理时间），单键超 5 秒自动 release 兑底。";
+
+        public static string GetDecisionPrompt()
+        {
+            if (s_decisionPrompt == null)
+            {
+                s_decisionPrompt = UnityEditor.EditorPrefs.GetString(DECISION_PROMPT_KEY, DEFAULT_DECISION_PROMPT);
+            }
+            return s_decisionPrompt;
+        }
+
+        public static string SetDecisionPrompt(string prompt)
+        {
+            s_decisionPrompt = string.IsNullOrEmpty(prompt) ? DEFAULT_DECISION_PROMPT : prompt;
+            UnityEditor.EditorPrefs.SetString(DECISION_PROMPT_KEY, s_decisionPrompt);
+            return "decision prompt set (" + s_decisionPrompt.Length + " chars)";
+        }
+
         // Play Mode 进入时场景对象重建，重新探测。
         // 双保险：单例 OnEnable 时重置 + EditorApplication.playModeStateChanged
         // 钩子在 EnteredPlayMode 时重置。OnEnable 可能比场景对象初始化早（Play

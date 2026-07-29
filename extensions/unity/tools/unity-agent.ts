@@ -278,6 +278,15 @@ async function runTask(
 				"AgentInput.TakeOver() 接管失败——Play Mode 场景对象未就绪或 AgentInput 未安装。确保已 install bridge 并进入 Play Mode。", totalStart);
 		}
 
+		// 从 PiBridge 取决策提示词模板（项目可自定义，改了无需 reload pi 扩展）。
+		// 取失败用 undefined，decideAction 会回退到内置默认。
+		let decisionPrompt: string | undefined;
+		try {
+			const pr = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetDecisionPrompt()" }, 10000);
+			if (pr.ok && typeof pr.result?.value === "string") decisionPrompt = pr.result.value;
+		} catch { /* best-effort */ }
+
+
 		for (let step = 1; step <= maxSteps; step++) {
 			const stepStart = Date.now();
 
@@ -305,7 +314,7 @@ async function runTask(
 			// 视觉决策
 			let decision: { action: AgentAction; durationMs: number };
 			try {
-				decision = await decideAction(capture.base64, prompt, history, frameHistory);
+				decision = await decideAction(capture.base64, prompt, history, frameHistory, decisionPrompt);
 			} catch (e) {
 				return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
 					`视觉决策失败（第 ${step} 步）: ${(e as Error).message}`, totalStart);
