@@ -363,8 +363,8 @@ namespace PiBridge
             {
                 var pos = s_playerController.transform.position;
                 var fwd = s_playerController.transform.forward;
-                sb.Append(",\"pos\":{").Append($"\"x\":{pos.x:F1},\"y\":{pos.y:F1},\"z\":{pos.z:F1}}");
-                sb.Append(",\"forward\":{").Append($"\"x\":{fwd.x:F2},\"z\":{fwd.z:F2}}");
+                sb.Append(",\"pos\":{").Append("\"x\":").Append(pos.x.ToString("F1")).Append(",\"y\":").Append(pos.y.ToString("F1")).Append(",\"z\":").Append(pos.z.ToString("F1")).Append("}");
+                sb.Append(",\"forward\":{").Append("\"x\":").Append(fwd.x.ToString("F2")).Append(",\"z\":").Append(fwd.z.ToString("F2")).Append("}");
                 var t = s_playerController.GetType();
                 try { var p = t.GetProperty("IsGrounded"); if (p != null) sb.Append(",\"grounded\":").Append((bool)p.GetValue(s_playerController)); } catch { }
                 try { var p = t.GetProperty("CurrentPlanarSpeed"); if (p != null) sb.Append(",\"speed\":").Append(((float)p.GetValue(s_playerController)).ToString("F1")); } catch { }
