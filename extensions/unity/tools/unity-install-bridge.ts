@@ -62,6 +62,10 @@ export interface UnityInstallBridgeResult {
 	// If non-empty, the new PiBridge.cs failed to compile — bridge may be
 	// running stale code. Agent/user must fix before relying on new features.
 	compileErrors: string[];
+	// Number of runtime agent scripts (AgentRuntime/*.cs) copied to
+	// Assets/Scripts/AgentInput/. These are #if UNITY_EDITOR-gated runtime
+	// MonoBehaviours for agent input takeover — stripped from packaged builds.
+	runtimeScriptsCopied: number;
 }
 
 // Resolve the extension's own directory at runtime so we can read the bundled
@@ -134,8 +138,17 @@ export async function runUnityInstallBridge(
 	const bridgeDir = join(editorDir, "PiBridge");
 	mkdirSync(bridgeDir, { recursive: true });
 
-	// 4. Copy each .cs file into the subfolder, overwriting any existing file
+	// 4. Copy each .cs file into the subfolder, overwriting any existing file.
+	//    Also remove stale .cs in the target that aren't in the source anymore
+	//    (e.g. a file renamed/moved out of the source tree), so a reinstall
+	//    doesn't leave orphaned scripts that could fail to compile.
 	const installedFiles: string[] = [];
+	const sourceFileSet = new Set(sourceFiles);
+	for (const existing of readdirSync(bridgeDir).filter((f) => f.endsWith(".cs"))) {
+		if (!sourceFileSet.has(existing)) {
+			try { unlinkSync(join(bridgeDir, existing)); } catch { /* best-effort */ }
+		}
+	}
 	for (const file of sourceFiles) {
 		const targetPath = join(bridgeDir, file);
 		const content = readFileSync(join(bridgeSourceDir, file), "utf-8");
@@ -143,6 +156,35 @@ export async function runUnityInstallBridge(
 		installedFiles.push(targetPath);
 	}
 
+	// 4b. Copy runtime agent scripts (AgentRuntime/*.cs) to Assets/Scripts/AgentInput/.
+	//     These are runtime MonoBehaviours (#if UNITY_EDITOR-gated) that the agent
+	//     uses to take over game input in Play Mode — they must live OUTSIDE the
+	//     Editor/ folder so they can be AddComponent'd and run LateUpdate in Play
+	//     Mode. The whole class is wrapped in #if UNITY_EDITOR, so it's stripped
+	//     from non-Editor builds (never ships in the packaged app).
+	const agentRuntimeSourceDir = join(bridgeSourceDir, "AgentRuntime");
+	let runtimeScriptsCopied = 0;
+	if (existsSync(agentRuntimeSourceDir)) {
+		const runtimeTargetDir = join(projectPath, "Assets", "Scripts", "AgentInput");
+		mkdirSync(runtimeTargetDir, { recursive: true });
+		// Remove stale .cs in the target that aren't in the source anymore, so an
+		// uninstall/reinstall doesn't leave orphaned runtime scripts that could
+		// fail to compile (e.g. a renamed file).
+		const runtimeSourceFiles = new Set(
+			readdirSync(agentRuntimeSourceDir).filter((f) => f.endsWith(".cs")),
+		);
+		for (const existing of readdirSync(runtimeTargetDir).filter((f) => f.endsWith(".cs"))) {
+			if (!runtimeSourceFiles.has(existing)) {
+				try { unlinkSync(join(runtimeTargetDir, existing)); } catch { /* best-effort */ }
+			}
+		}
+		for (const file of runtimeSourceFiles) {
+			const targetPath = join(runtimeTargetDir, file);
+			writeFileSync(targetPath, readFileSync(join(agentRuntimeSourceDir, file), "utf-8"), "utf-8");
+			installedFiles.push(targetPath);
+			runtimeScriptsCopied++;
+		}
+	}
 	// 5. Copy the Roslyn C# scripting DLLs matching this project's Unity version.
 	//    Required by the `eval` command — without them PiBridge.cs would fail to
 	//    compile (RoslynEval.cs references Microsoft.CodeAnalysis.CSharp.Scripting).
@@ -198,6 +240,11 @@ export async function runUnityInstallBridge(
 	} else {
 		nextSteps.push(
 			`eval is ready: Roslyn ${roslynVersion} (${roslynDllsCopied} DLLs) copied — eval is enabled by default (no opt-in env var needed).`
+	)
+	}
+	if (runtimeScriptsCopied > 0) {
+		nextSteps.push(
+			`Agent input takeover ready: ${runtimeScriptsCopied} runtime script(s) copied to Assets/Scripts/AgentInput/ — #if UNITY_EDITOR-gated, stripped from packaged builds.`,
 		);
 	}
 
@@ -353,5 +400,6 @@ export async function runUnityInstallBridge(
 		bridgeReady,
 		bridgeWaitMs,
 		compileErrors,
+		runtimeScriptsCopied,
 	};
 }
