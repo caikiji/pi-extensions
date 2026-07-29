@@ -345,8 +345,12 @@ wait 只用于需要停下来观察画面的场景，不要连续多步 wait。
 
 - **按键管理**：按下的键持续生效直到 release。之前 press 了 W 还没 release，角色还在走——
   要么继续走，要么 release W 停下。不要重复 press 同一个已按下的键。
-- **status 判断**：画面已满足任务目标→success；无法推进→stuck；否则 ongoing。
+- **status 判断**：
+  - 画面已明显满足任务目标 → success
+  - 连续多步尝试后仍毫无进展（角色没动/反复撞墙）→ stuck
+  - 其他情况 → ongoing（**首步必须是 ongoing，不要一上来就 stuck**）
   任务达成后立即 success，不要继续动作。
+  **不要轻易放弃**：只要还有可能推进，就返回 ongoing 并执行动作，不要 stuck。
 - 每步约持续 2 秒（推理时间），单键超 5 秒自动 release 兑底。`
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
