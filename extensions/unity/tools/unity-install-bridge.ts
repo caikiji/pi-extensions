@@ -20,11 +20,14 @@
  * After install, Unity auto-compiles on focus and the bridge starts, after
  * which unity_command becomes usable.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
 import { discoverBridge, sendCommand, waitForBridge } from "../lib/bridge-client.ts";
+import { getGlobalEditorLogPath, readLogByPath } from "../lib/editor-log.ts";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const unityInstallBridgeParams = Type.Object({
 	projectPath: Type.String({
@@ -215,6 +218,15 @@ export async function runUnityInstallBridge(
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
 	let compileErrors: string[] = [];
+	// Record Editor.log size before install so we can read only the new
+	// compile output afterwards. Unity's Console gets wiped on domain reload,
+	// but Editor.log persists — that's where compile errors survive.
+	const editorLogPath = getGlobalEditorLogPath();
+	let editorLogOffset = 0;
+	if (editorLogPath) {
+		try { const st = statSync(editorLogPath); editorLogOffset = st.size; } catch { /* may not exist yet */ }
+	}
+
 	if (unityLikelyOpen) {
 		// Kick off the reload NOW (while the bridge is still up) so the wait
 		// below reliably sees the offline→online transition. Without this, the
@@ -238,30 +250,38 @@ export async function runUnityInstallBridge(
 			// even when the new PiBridge.cs failed to compile — the bridge runs
 			// stale code from the last good build. Surface this so the agent/user
 			// doesn't waste time testing a change that never took effect.
+			// Check for compile errors via Editor.log (NOT Unity Console — domain
+			// reload wipes the Console, hiding CS errors that happened during
+			// compile). Editor.log persists across reloads. We read only the bytes
+			// appended after install started (editorLogOffset) to avoid stale errors
+			// from previous compiles.
 			try {
-				const logResp = await sendCommand<{ entries?: { message?: string; file?: string; line?: number }[] }>(
-					waited.bridge.port!,
-					"log",
-					{ count: 50, severity: "error" },
-					15000,
-				);
-				if (logResp.ok && logResp.result?.entries) {
-					// CSxxxx = C# compile errors. Exclude the known Roslyn DLL load
-					// warnings about System.Runtime.Loader (those don't block compile).
-					compileErrors = logResp.result.entries
-						.map((e) => e.message?.split("\n")[0] ?? "")
-						.filter((msg) => /CS\d{4}/.test(msg) && !msg.includes("System.Runtime.Loader"));
+				await sleep(2000); // give Unity time to flush compile output to Editor.log
+				if (editorLogPath) {
+					const logResult = readLogByPath(editorLogPath);
+					if (logResult.exists && logResult.content.length > editorLogOffset) {
+						const newContent = logResult.content.slice(editorLogOffset);
+						const seen = new Set<string>();
+						for (const line of newContent.split("\n")) {
+							const m = line.match(/(Assets\\[^:]+\([^)]+\): error CS\d{4}:.*)/);
+							if (m && !seen.has(m[1])) {
+								seen.add(m[1]);
+								compileErrors.push(m[1]);
+							}
+						}
+					}
 					if (compileErrors.length > 0) {
 						nextSteps.push(
-							`⚠ ${compileErrors.length} compile error(s) detected after recompile! The new PiBridge.cs did NOT compile — bridge is running stale code.`,
+							`⚠ ${compileErrors.length} compile error(s) detected! The new PiBridge.cs did NOT compile — bridge is running STALE code from the previous build.`,
 						);
-						for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  • ${e}`);
-						nextSteps.push("Fix the errors in PiBridge.cs and reinstall, or check unity_command log for details.");
+						for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  ✗ ${e}`);
+						if (compileErrors.length > 5) nextSteps.push(`  ... and ${compileErrors.length - 5} more`);
+						nextSteps.push("Fix the errors and reinstall. Do NOT trust unity_command until compile succeeds — it's running old code.");
 					}
 				}
 			} catch {
-				// log query failed — non-fatal, bridge is still usable
-				}
+				// Editor.log read failed — non-fatal, bridge is still usable
+			}
 		} else {
 			nextSteps.push(
 				`⚠ Bridge did not come back online within ${Math.round(bridgeWaitMs / 1000)}s. `
