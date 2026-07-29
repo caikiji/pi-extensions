@@ -557,6 +557,39 @@ namespace PiBridge
             catch { /* best-effort */ }
         }
 
+        /// <summary>
+        /// 释放鼠标：探测 InputLock 并设 UiOpen=true（会一并解锁 Cursor），
+        /// 同时直接 Cursor.lockState=None 双保险。Play Mode 进入时立即调用，
+        /// 避免游戏默认捕获鼠标抢走 OS 焦点。幂等。
+        /// </summary>
+        public static void ReleaseMouse()
+        {
+            // 先探测 InputLock（静态类，不依赖场景对象，任何时候都能找）
+            if (s_inputLockType == null)
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        foreach (var t in asm.GetTypes())
+                        {
+                            if (t.Name == "InputLock" && t.IsClass && t.IsAbstract)
+                            {
+                                s_inputLockType = t;
+                                s_inputLockUiOpenProp = t.GetProperty("UiOpen", BindingFlags.Public | BindingFlags.Static);
+                                break;
+                            }
+                        }
+                    } catch { }
+                    if (s_inputLockType != null) break;
+                }
+            }
+            TrySetInputLockUiOpen(true);
+            // 双保险：即使没有 InputLock，也直接解锁 Cursor
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+        }
+
         // Play Mode 进入时场景对象重建，重新探测。
         // 双保险：单例 OnEnable 时重置 + EditorApplication.playModeStateChanged
         // 钩子在 EnteredPlayMode 时重置。OnEnable 可能比场景对象初始化早（Play
@@ -576,7 +609,13 @@ namespace PiBridge
             // EnteredPlayMode：场景刚重建，之前探测的对象已失效，标记需重探。
             // 下次 ProbeStatic()/TakeOver() 会重新扫场景。
             if (state == PlayModeStateChange.EnteredPlayMode)
+            {
                 ResetProbe();
+                // Play Mode 一进入就释放鼠标：游戏默认 InputLock.UiOpen=false 会
+                // Cursor.lockState=Locked 捕获鼠标，抢走 OS 焦点。agent 开发期间
+                // 不需要玩家操控，立即释放让用户能正常用鼠标。
+                ReleaseMouse();
+            }
         }
 #endif
 

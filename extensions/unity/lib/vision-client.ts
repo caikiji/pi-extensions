@@ -254,7 +254,9 @@ ${historyText}
 当前画面见附图。决定下一步动作。规则:
 - 每步只选一个原始动作，不能组合（如不能 "turn_right then move_forward"）
 - move_forward / move_backward: 前后移动，params 用 duration_ms（毫秒），建议 500-2000
-- turn_left / turn_right: 转向（每次约 30-45 度），params 用 duration_ms，建议 200
+- turn_left / turn_right: 转动视角（相机），params 用 duration_ms，建议 400-600（约转 45-70 度）。
+  **重要**：如果任务目标不在当前画面中（看不到目标），必须先 turn_left 或 turn_right
+  四处环顾寻找目标，找到后再 move_forward 靠近。不要在看不到目标时一直前进。
 - click: 点击屏幕位置，params 用 x,y（相对坐标 0~1）
 - interact / jump: params 留空 {}
 - wait: params 用 duration_ms
@@ -262,7 +264,9 @@ ${historyText}
   - 如果当前画面已经满足任务目标（或已明显达成），必须返回 status=success
   - 如果任务无法推进（卡住、无法判断），返回 status=stuck
   - 否则返回 status=ongoing
-- 不要过度执行：任务达成后立即 success，不要继续动作`;
+- 不要过度执行：任务达成后立即 success，不要继续动作
+- **决策多样性**：根据画面灵活选择动作，不要连续多步只做同一个动作。
+  如果连续 3 步以上 move_forward 仍无进展，应该尝试转向观察周围环境。`
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
