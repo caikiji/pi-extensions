@@ -232,39 +232,36 @@ POST /capture
 
 ### 1. run_task 超时与 Pi tool call 的兼容
 
-Pi 的 tool call 有超时限制（通常几分钟）。run_task 循环可能跑 20 步、每步 2~3 秒，
-接近一分钟。如果 Pi 超时断开，中间状态就丢了。
+**方向已定（Phase 0 数据修正）。** 实测每步耗时：截图 Play Mode 下 ~1.2s + schema 约束视觉决策 ~2s ≈ 3.2s/步。20 步 ≈ 64s，接近 Pi tool call 超时。
 
-两种思路：
-- 工具内部维护状态，Pi 可以分多次调用接续任务
-- 循环完全在工具内部完成，超时前返回结果
+**采用「循环在工具内 + 超时返回 incomplete」方案，但利用一个关键洞察：Unity 画面本身就是持久状态。** 不需要跨调用的 session 管理——incomplete 时 Pi 用一次新的 `unity_agent run_task` 调用接续，把“上次停在哪、目标是什么”作为 prompt 传进去，工具重新截图就是当前状态。复杂度降为零。
 
-尚未决定用哪种。
+原“工具内部维护状态分次接续”方案不需要。
 
 ### 2. MiniCPM-V 输出可靠性
 
-小模型不一定每次都输出合法 JSON，可能出现：
-- 格式正确但 action 不在定义范围内
-- 格式正确但语义错误（画面没路却让往前）
-- 完全不是 JSON
+**✅ 已解决（Phase 0 验证）。** 用 ollama 原生 `/api/generate` 的 `format` 参数传 JSON Schema，从语法层面强制约束：action 枚举、required 字段、params 结构。三次实测 100% 合法 + 字段齐全 + action 不越界，且推理耗时从 prompt 约束的 9~12s 降到 **1.7~2.1s**（模型不再思考格式）。
 
-工具层需要兜底策略：重试？几次？还是直接报 stuck？
+原以为需要的 GBNF grammar / 重试兜底可以省去。代价：必须用 ollama 原生 API（非 OpenAI 兼容端点），`images` 字段吃 base64 数组。若未来换 llama-server 需 fallback。
 
+schema 注意点：`x/y` 坐标字段要加 `{type:"number", minimum:0, maximum:1}`，否则模型会输出 `x:100` 等越界值（不影响 action 决策，工具层执行时按 action 类型决定是否用 params）。
+
+语义错误（画面没路却让往前）仍无法在工具层防，交给 run_task 多步循环容错——走错下一步模型会看到没变化自己纠正。
+
+历史记录（prompt 约束的实测问题，schema 后已消失）：
+- 偶发漏 `status`/`reason` 字段
+- action 越界（如 `"turn_right then move forward to the right character"` 组合字符串）
 ### 3. Play Mode 崩溃检测
 
-run_task 跑着跑着 Play Mode 退出（编译、异常、手动退出），工具怎么感知？
-两种方式：
-- 每次 capture 时检测 isPlaying 字段
-- 依赖 unity_events 订阅 playmode_exited
+**方向已定。** run_task 内部用 **capture 返回的 isPlaying** 做崩溃检测，不依赖 SSE 事件。理由：run_task 循环是工具内部同步跑，SSE 事件会通过 `pi.sendUserMessage` 打断 Agent，但此刻 Agent 正在等 unity_agent 工具返回，打断消息会很尴尬。而 capture 返回里已带 `isPlaying` 字段（见 capture schema），每步本来就要 capture，顺带检查零成本。
 
-各有优劣，待定。
+SSE 事件订阅的价值在非 run_task 场景（Agent 单独 enter play mode 后干别的活）。run_task 内部用不上。
+
+崩溃时返回 `status: "crashed"` + 最后画面 + 最后异常日志（调 `unity_command log`）。
 
 ### 4. 对 Roslyn eval 的前置依赖
 
-本工具的所有操控操作都依赖 `unity_command eval` 执行任意 C# 来驱动游戏。
-Roslyn eval 在 PR #1（feat/roslyn-eval-proposal）中，尚未合并。
-本提案的实操依赖它的落地。
-
+**✅ 已解决。** Roslyn eval 已合并到 main（PiBridge 0.6.0，commit `230815d`），trailing-return / enum / UnityEngine.Object 序列化三个 bug 已修。实测在 Unity 2019.4.36f1 上 eval 稳定运行，截图代码、Camera 查询、后续输入模拟均走 eval。
 ### 5. 基本动作集
 
 目前只提到了 move_forward 和 turn_left。实际 Play Mode 中需要的最小动作集是什么？
@@ -299,3 +296,58 @@ llama-server -m MiniCPM-V-4_6-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf -ngl 99
 
 - 不加其他新工具/新命令。一个 `unity_agent` 涵盖所有场景。
 - 不加高帧率实时视频流（>15fps）。N 帧/步的低帧率片段足矣，且 MiniCPM-V 也处理不了更快的输入。
+
+---
+
+## Phase 0 验证报告（2026-07-29）
+
+在 `D:\workspace\CourseProject`（Unity 2019.4.36f1, URP）上，用 PiBridge 0.6.0 + ollama `minicpm-v4.6:latest` 完成端到端验证。**所有核心假设成立。**
+
+### 截图能力（eval 内联，无需新增 capture 命令）
+
+eval 内联 RenderTexture 截图完全可行，返回 base64 字符串经 SimpleJson passthrough 无损传输。提案里计划的 `capture` 命令**降级为可选**——只有需要多帧 clip、独立相机选择时才值得固化。MVP 可用 TS 层多次调 eval 截图模拟 clip。
+
+| 场景 | 耗时 | 体积 |
+|------|------|------|
+| Editor 模式 | 404-448ms | 86KB (384×384 PNG) |
+| Play Mode | 1248ms | 90KB |
+
+Play Mode 比 Editor 慢约 3 倍（游戏在跑、渲染更重），run_task 循环要计入。
+
+### 视觉理解能力
+
+MiniCPM-V 4.6 准确识别：角色数量/位置（左/右）/朝向（背对/面向）/是否持武器/场景类型（战斗/探索）/环境元素（树木/树桩/岩石）/3D Text 标记（“敌”字）。
+
+### Action 决策 + schema 约束（最大收获）
+
+对比两种 JSON 输出约束：
+
+| 维度 | prompt 约束 | ollama `format` schema |
+|------|------------|----------------------|
+| JSON 合法率 | 100%（3/3）| 100%（3/3）|
+| action 枚举合法 | ❌ 偶发越界（组合字符串）| ✅ 100% |
+| 必需字段齐全 | ❌ 偶发漏 status/reason | ✅ 100% |
+| 推理耗时 | 9-12s | **1.7-2.1s** ⚡ |
+| API | OpenAI 兼容 `/v1/chat/completions` | ollama 原生 `/api/generate` |
+
+**schema 约束让推理速度提升 5-6 倍**，且彻底消灭 Q2 风险。提案里建议的“GBNF grammar + 重试兜底”大幅简化——直接用 ollama `format` 即可。
+
+### observe 模式端到端
+
+总耗时 3.7-7s（截图 + 描述），可接受。observe 模式已可交付价值。
+
+### 验证脚本
+
+位于 `scripts/`：
+- `vision-probe.mjs` — observe 模式（截图+描述）
+- `vision-json-test.mjs` — prompt 约束 JSON 测试
+- `vision-action-test.mjs` — prompt 约束 action 决策
+- `vision-schema-test.mjs` — **schema 约束 action 决策（推荐方案）**
+
+### 对实现优先级的影响
+
+1. **vision-client 直接用 ollama `/api/generate` + format schema**，不用 OpenAI 兼容端点
+2. **capture 命令降级为可选**，observe 模式直接用 eval 内联截图
+3. **run_task 每步 ~3.2s**（截图 1.2s + 视觉 2s），20 步 ~64s，必须支持 incomplete 续跑
+4. **schema 要给 x/y 加 `minimum:0, maximum:1`**
+5. 实现顺序：vision-client.ts → unity_agent observe → 输入模拟 eval 验证 → run_task 循环

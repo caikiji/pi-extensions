@@ -14,6 +14,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { runUnityAgent, unityAgentParams, type UnityAgentParams, type UnityAgentResult } from "./tools/unity-agent.ts";
 import { runUnityCommand, unityCommandParams, type UnityCommandResult } from "./tools/unity-command.ts";
 import { runUnityEvents, unityEventsParams, type UnityEventsResult } from "./tools/unity-events.ts";
 import { runUnityInstallBridge, unityInstallBridgeParams, type UnityInstallBridgeResult } from "./tools/unity-install-bridge.ts";
@@ -268,6 +269,46 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ─── unity_agent ────────────────────────────────────────────────────────
+	// 视觉驱动的 Unity 测试。通过 MiniCPM-V “看见” Play Mode 画面并（未来）驱动多步
+	// 视觉-操作循环。observe 模式已实现，run_task 模式 v2 待输入模拟落地后启用。
+	pi.registerTool({
+		name: "unity_agent",
+		label: "Unity Agent",
+		description:
+			"视觉驱动的 Unity Play Mode 测试工具。通过本地 MiniCPM-V 视觉模型“看见”游戏画面。\n" +
+			"两种模式：\n" +
+			"- observe: 截取当前画面并分析，不做操作（已实现）\n" +
+			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成（v2 开发中，当前返回 not implemented）\n" +
+			"依赖：PiBridge 0.6.0+（eval）+ 本地 ollama + minicpm-v 模型。",
+		
+		promptSnippet: "让 MiniCPM-V 视觉模型分析 Unity 游戏画面（observe 模式）",
+		promptGuidelines: [
+			"Use unity_agent (mode=observe) to let a vision model (MiniCPM-V) see and analyze the current Unity Game View. Pass the analysis instruction in prompt.",
+			"unity_agent requires a local ollama service with a minicpm-v model loaded. If visionError reports ollama unavailable, start ollama and pull the model first.",
+			"observe mode captures via PiBridge eval (no new bridge command needed). The capture field reports isPlaying — if false, you are seeing the Editor scene view, not the running game. Enter Play Mode via unity_command play first for real gameplay.",
+		],
+		parameters: unityAgentParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await runUnityAgent(params as UnityAgentParams, ctx.cwd);
+			return {
+				content: [{ type: "text", text: formatUnityAgentResult(result) }],
+				details: result,
+			};
+		},
+
+		renderResult(result, _options, theme) {
+			const details = result.details as UnityAgentResult | undefined;
+			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
+			if (details.error && !details.analysis) {
+				return new Text(theme.fg("error", `✗ ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms`), 0, 0);
+			}
+			const playing = details.capture?.isPlaying ? theme.fg("success", "▶ play") : theme.fg("dim", "○ edit");
+			return new Text(theme.fg("accent", `👁 ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms `) + playing, 0, 0);
+		},
+	});
+
 	// ─── /unity-install-bridge ──────────────────────────────────────────────
 	// User-facing shortcut: install PiBridge into cwd's Unity project without
 	// routing through the agent.
@@ -480,5 +521,55 @@ function formatUnityEventsResult(result: UnityEventsResult): string {
 			lines.push(`Error: ${result.response.error}`);
 		}
 	}
+	return lines.join("\n");
+}
+
+function formatUnityAgentResult(result: UnityAgentResult): string {
+	const lines: string[] = [];
+	lines.push(`Unity Agent — ${result.mode} (${result.totalMs}ms)`);
+	lines.push("");
+
+	if (!result.bridge.available) {
+		lines.push("⚠ PiBridge is not running.");
+		lines.push("");
+		lines.push("Install via unity_install_bridge and open the Unity project, then retry.");
+		if (result.error) {
+			lines.push("");
+			lines.push(`Reason: ${result.error}`);
+		}
+		return lines.join("\n");
+	}
+
+	lines.push(`Bridge: ${result.bridge.url} (v${result.bridge.version})`);
+	lines.push(`Vision: ${result.visionAvailable ? `✓ ${result.visionModel}` : "✗ unavailable"}`);
+	lines.push("");
+
+	if (result.error && !result.analysis) {
+		lines.push("✗ Failed");
+		lines.push("");
+		lines.push(`Error: ${result.error}`);
+		return lines.join("\n");
+	}
+
+	if (result.capture) {
+		lines.push(
+			`Capture: ${result.capture.width}×${result.capture.height}, ${result.capture.captureMs}ms, ` +
+				(result.capture.isPlaying ? "▶ Play Mode" : "○ Edit Mode (not in Play Mode — seeing scene view, not gameplay)"),
+		);
+	}
+
+	if (result.analysis) {
+		lines.push("");
+		lines.push("Analysis:");
+		lines.push("─".repeat(60));
+		lines.push(result.analysis);
+		lines.push("─".repeat(60));
+	}
+
+	if (result.error) {
+		lines.push("");
+		lines.push(`⚠ ${result.error}`);
+	}
+
 	return lines.join("\n");
 }
