@@ -297,12 +297,14 @@ const ACTION_SCHEMA = {
  * @param taskGoal 任务描述，如 "走到红色 checkpoint 触发它"
  * @param history 已执行步骤（提供上下文，让模型知道之前做了什么）
  * @param recentFrames 最近几帧的 base64 图片（时间顺序，最早→最近），让模型看到运动轨迹
+ * @param decisionPrompt 决策规则提示词（从 PiBridge AgentInput.GetDecisionPrompt 取回，项目可自定义）
  */
 export async function decideAction(
 	base64: string,
 	taskGoal: string,
 	history: ActionHistory[] = [],
 	recentFrames: string[] = [],
+	decisionPrompt?: string,
 	signal?: AbortSignal,
 ): Promise<{ action: AgentAction; durationMs: number }> {
 	const historyText =
@@ -315,6 +317,8 @@ export async function decideAction(
 		? "当前画面见附图（1 帧）。"
 		: `附图是全部历史画面共 ${frameCount} 帧，按时间顺序排列（最早→最近），最后一张是当前画面。通过对比这些帧你可以看出角色的运动轨迹和视角变化，判断之前的动作是否生效、目标是否在移动，记住目标出现过方位。`;
 
+	const rules = decisionPrompt ?? "当前画面见附图。决定下一步动作。";
+
 	const prompt = `你是游戏 AI agent。当前在 Unity Play Mode 中运行一个游戏。
 
 任务目标: ${taskGoal}
@@ -324,34 +328,7 @@ ${frameDesc}
 已执行的历史步骤:
 ${historyText}
 
-当前画面见附图。决定下一步动作。规则:
-- 每步只选一个原始动作，不能组合
-- press: 按住一个键开始持续动作，params.key 指定键：
-    W=前进, S=后退, A=左移, D=右移, Shift=冲刺(需配合 WASD),
-    TurnLeft=向左转视角, TurnRight=向右转视角
-- release: 松开一个键停止该动作，params.key 同上
-- interact: 交互（E 键），params 留空 {}
-- jump: 跳跃（空格），params 留空 {}
-- wait: 纯等待观察（不动），params 留空 {}
-
-**操控模型（重要）**：像玩家一样按键。例：要前进就 press W，看到快到了就 release W。
-要转向就 press TurnLeft，转够了就 release TurnLeft。不猜时长，靠 press/release 控制。
-典型序列：press W（开始走）→ 几步后 release W（停下）→ press TurnLeft（转身找路）→ release TurnLeft。
-
-**必须主动移动**：任务要求移动时必须用 press WASD，不要一直 wait。
-wait 只用于需要停下来观察画面的场景，不要连续多步 wait。
-如果任务目标不在当前画面中（看不到目标），必须先 press TurnLeft 或 TurnRight 四处环顾寻找，
-找到后 release 转向键 + press W 靠近。
-
-- **按键管理**：按下的键持续生效直到 release。之前 press 了 W 还没 release，角色还在走——
-  要么继续走，要么 release W 停下。不要重复 press 同一个已按下的键。
-- **status 判断**：
-  - 画面已明显满足任务目标 → success
-  - 连续多步尝试后仍毫无进展（角色没动/反复撞墙）→ stuck
-  - 其他情况 → ongoing（**首步必须是 ongoing，不要一上来就 stuck**）
-  任务达成后立即 success，不要继续动作。
-  **不要轻易放弃**：只要还有可能推进，就返回 ongoing 并执行动作，不要 stuck。
-- 每步约持续 2 秒（推理时间），单键超 5 秒自动 release 兑底。`
+${rules}`;
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
