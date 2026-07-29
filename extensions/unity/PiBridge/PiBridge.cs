@@ -743,6 +743,16 @@ namespace PiBridge
         private static void RegisterShutdown()
         {
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
+            // Play Mode 进入时释放鼠标：游戏默认捕获鼠标（Cursor.lockState=Locked），
+            // 抢走 OS 焦点阻碍 agent 开发。EnteredPlayMode 时调 AgentInput.ReleaseMouse
+            // 立即解锁，让用户能正常用鼠标（不依赖运行时单例 OnEnable 的时机）。
+            EditorApplication.playModeStateChanged += state =>
+            {
+                if (state == PlayModeStateChange.EnteredPlayMode)
+                {
+                    try { PiBridge.AgentInput.ReleaseMouse(); } catch { /* best-effort */ }
+                }
+            };
         }
 
         private static void Stop()

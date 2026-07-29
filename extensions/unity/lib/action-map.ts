@@ -192,12 +192,12 @@ export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 			steps.push({ code: `PiBridge.AgentInput.Move(0f, -1f, ${dur})`, label: `Move backward ${dur}ms`, waitMs: dur + 200 });
 			break;
 		case "turn_left":
-			// yaw 负 = 向左转。移动量随 duration 缩放（约 90度/800ms，可调）。
+			// yaw 负 = 向左转。系数 0.15：600ms≈90度，足够明显改变视角。
 			// C# float 字面量需 f 后缀，这里 JS 算好数值再拼。
-			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
+			steps.push({ code: `PiBridge.AgentInput.Turn(${(-dur * 0.15).toFixed(2)}f, 0f, ${dur})`, label: `Turn left ${dur}ms`, waitMs: dur + 200 });
 			break;
 		case "turn_right":
-			steps.push({ code: `PiBridge.AgentInput.Turn(${(dur * 0.11).toFixed(2)}f, 0f, ${dur})`, label: `Turn right ${dur}ms`, waitMs: dur + 200 });
+			steps.push({ code: `PiBridge.AgentInput.Turn(${(dur * 0.15).toFixed(2)}f, 0f, ${dur})`, label: `Turn right ${dur}ms`, waitMs: dur + 200 });
 			break;
 		case "interact":
 			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "Interact", waitMs: 500 });
