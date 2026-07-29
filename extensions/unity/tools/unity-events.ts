@@ -202,13 +202,14 @@ async function startSseLoop(pi: ExtensionAPI, projectPath: string, signal: Abort
 					// have learned about compile completion via unity_status/waitForBridge).
 					// The content flags this so the agent treats it as a hint, not
 					// authoritative state.
-					try {
-						await pi.sendMessage({
-							customType: "unity-event",
-							content: `Unity ${ev.event}${dataStr} (async notification — may lag; verify with unity_status/unity_log if actionable).`,
-							display: true,
-							details: { event: ev.event, data: ev.data },
-						}, { deliverAs: "followUp", triggerTurn: true });
+						const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
+						try {
+							await pi.sendMessage({
+								customType: "unity-event",
+								content: `[${ts}] Unity ${ev.event}${dataStr} (async notification — may lag; verify with unity_status/unity_log if actionable).`,
+								display: true,
+								details: { event: ev.event, data: ev.data, time: ts },
+							}, { deliverAs: "followUp", triggerTurn: true });
 					} catch {
 						// sendMessage failing shouldn't kill the loop.
 					}
