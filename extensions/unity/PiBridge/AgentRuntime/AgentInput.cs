@@ -81,6 +81,7 @@ namespace PiBridge
 
         // ─── 接管状态 + 虚拟输入值（static，eval 直接设）──────────────
         private static bool s_takeover;
+        private static bool s_allowPlayerControl;  // true=不禁用游戏控制器/不锁鼠标，人机共存
         private static Vector2 s_virtualMove = Vector2.zero;   // (-1~1, -1~1)
         private static bool s_virtualSprint;
         private static float s_virtualYawDelta;                // 本帧 yaw 增量（度）
@@ -151,22 +152,43 @@ namespace PiBridge
             return sb.ToString();
         }
 
-        /// <summary>开始接管输入。禁用游戏 PlayerController，AgentInput 接管移动。</summary>
-        public static string TakeOver()
+        /// <summary>
+        /// 开始接管输入。
+        /// </summary>
+        /// <param name="allowPlayerControl">
+        /// false（默认）= 完全接管：禁用游戏 PlayerController、释放鼠标、设 InputLock，
+        ///   玩家无法操控，agent 独占驱动角色。适合 agent 自动跑任务。
+        /// true = 共享控制：不禁用 PlayerController、不锁鼠标，玩家可正常操控，
+        ///   agent 的动作会与玩家输入并存（注意：游戏 Update 仍用 Input 覆盖 moveInput，
+        ///   agent 通过 CharacterController.Move 驱动可能与玩家移动叠加，适合调试协助）。
+        /// </param>
+        public static string TakeOver(bool allowPlayerControl = false)
         {
             ProbeStatic();
             var inst = Instance;
             s_takeover = true;
-            // 禁用游戏 PlayerController：它的 Update 每帧用 Input 覆盖 moveInput 并
-            // 调 CharacterController.Move。若不禁用，会和 AgentInput 双重移动 + Input
-            // 冲掉虚拟输入。记下原 enabled 以便 Release 恢复。
-            if (s_playerController != null)
+            s_allowPlayerControl = allowPlayerControl;
+            if (!allowPlayerControl)
             {
-                s_playerWasEnabled = s_playerController.enabled;
-                s_playerController.enabled = false;
+                // 完全接管：禁用游戏 PlayerController（它的 Update 每帧用 Input 覆盖
+                // moveInput 并调 CharacterController.Move，会和 AgentInput 双重移动 +
+                // Input 冲掉虚拟输入）。记下原 enabled 以便 Release 恢复。
+                if (s_playerController != null)
+                {
+                    s_playerWasEnabled = s_playerController.enabled;
+                    s_playerController.enabled = false;
+                }
+                // 释放鼠标：游戏通常在 UI 关闭时 Cursor.lockState=Locked 捕获鼠标，
+                // 这会抢走 OS 焦点、阻碍用户操作。接管期间强制解锁 + 显示光标，
+                // LateUpdate 每帧维持（防游戏重新锁定）。
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+                // 同时尝试设 InputLock.UiOpen=true（双保险：让游戏自己的输入逻辑也停）。
+                TrySetInputLockUiOpen(true);
             }
             return "took over input: playerController=" + (s_playerController != null)
                 + " charController=" + (s_charController != null)
+                + " allowPlayerControl=" + allowPlayerControl
                 + " (isPlaying=" + Application.isPlaying + ")";
         }
 
@@ -174,6 +196,7 @@ namespace PiBridge
         public static string Release()
         {
             s_takeover = false;
+            s_allowPlayerControl = false;
             s_virtualMove = Vector2.zero;
             s_virtualSprint = false;
             s_virtualYawDelta = 0;
@@ -252,6 +275,19 @@ namespace PiBridge
 
             if (!s_takeover) return;
             if (!Application.isPlaying) return;
+
+            // 完全接管模式：每帧维持鼠标释放 + InputLock.UiOpen=true。
+            // 游戏可能在某处重新 Cursor.lockState=Locked 抢走 OS 焦点，接管期间持续覆盖。
+            // 共享模式（allowPlayerControl=true）不碋鼠标，玩家可正常操控。
+            if (!s_allowPlayerControl)
+            {
+                if (Cursor.lockState != CursorLockMode.None)
+                {
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
+                TrySetInputLockUiOpen(true);
+            }
             if (s_charController == null) return;
 
             float dt = Time.deltaTime;
@@ -390,6 +426,26 @@ namespace PiBridge
                     return (float)f.GetValue(obj);
             } catch { }
             return defaultVal;
+        }
+
+        /// <summary>
+        /// 反射设 InputLock.UiOpen=true（若探测到该静态类）。
+        /// 双保险：让游戏自己的输入逻辑走 UI 分支（不读 Input、不锁鼠标）。
+        /// 幂等，每帧调用安全。
+        /// </summary>
+        private static void TrySetInputLockUiOpen(bool open)
+        {
+            if (s_inputLockType == null) return;
+            try
+            {
+                // 优先调 SetUiOpen(bool) 方法（游戏的标准入口，会一并处理 Cursor）
+                var m = s_inputLockType.GetMethod("SetUiOpen", BindingFlags.Public | BindingFlags.Static);
+                if (m != null) { m.Invoke(null, new object[] { open }); return; }
+                // 退而求其次：直接设 UiOpen 属性
+                if (s_inputLockUiOpenProp != null && s_inputLockUiOpenProp.CanWrite)
+                    s_inputLockUiOpenProp.SetValue(null, open);
+            }
+            catch { /* best-effort */ }
         }
 
         // Play Mode 进入时场景对象重建，重新探测。单例 OnEnable 时重置。
