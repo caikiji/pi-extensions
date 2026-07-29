@@ -182,9 +182,15 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
  */
 export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 	const steps: ActionStep[] = [];
-	const key = action.params.key;
+	let key = action.params.key;
 
-	switch (action.action) {
+	// 纠错：模型常把 wait 误带 key（想 press 却选了 wait），转成 press；
+	// release 漏 key 则跳过（无法执行）。
+	let effectiveAction = action.action;
+	if (effectiveAction === "wait" && key) effectiveAction = "press";
+	if (effectiveAction === "release" && !key) effectiveAction = "wait";
+
+	switch (effectiveAction) {
 		case "press":
 			steps.push({ code: `PiBridge.AgentInput.PressKey("${key}")`, label: `press ${key}`, waitMs: 0 });
 			break;
