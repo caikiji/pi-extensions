@@ -523,9 +523,9 @@ namespace PiBridge
                 try
                 {
                     float targetYaw = s_playerController.transform.eulerAngles.y;
-                    float curYaw = (float)s_yawField.GetValue(s_followCamera);
-                    float smoothYaw = Mathf.SmoothDampAngle(curYaw, targetYaw, ref s_cameraYawSmoothVel, 0.1f);
-                    s_yawField.SetValue(s_followCamera, smoothYaw);
+                    // 直接设 yaw=角色朝向（不用 SmoothDampAngle——它速度变量可能失控导致 yaw 累加到 1.8万）。
+                    // 相机硬跟角色朝向，简单可靠。
+                    s_yawField.SetValue(s_followCamera, targetYaw);
                 } catch { }
             }
             if (s_followCamera != null && s_pitchField != null)
