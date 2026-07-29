@@ -225,10 +225,10 @@ async function runTask(
 	totalStart: number,
 ): Promise<UnityAgentResult> {
 	const history: ActionHistory[] = [];
-	// 视觉上下文：保留最近 8 帧截图（滑动窗口），让模型看到运动轨迹/视角变化，
-	// 而非每步只看孤立的当前帧。decideAction 传 [...recentFrames, currentFrame]。
+	// 视觉上下文：全量累积所有历史帧（不截断），让模型有完整记忆。
+	// ollama 有 prompt caching，相同前缀帧命中缓存，全量比滑动窗口更快。
+	// decideAction 传 [...frameHistory, currentFrame]，每步只多编码 1 帧新内容。
 	const frameHistory: string[] = [];
-	const MAX_FRAMES = 8;
 	const stepRecords: TaskStepRecord[] = [];
 	// 硬超时：留给每步 ~4s（注入+截图+视觉），加缓冲。最多跑到 maxSteps 或 85s。
 	const HARD_TIMEOUT_MS = 85000;
@@ -294,10 +294,10 @@ async function runTask(
 					`视觉决策失败（第 ${step} 步）: ${(e as Error).message}`, totalStart);
 			}
 
-			// 决策后把当前帧加入视觉历史滑动窗口（保留最近 MAX_FRAMES-1 帧，
-			// 下一步 decideAction 会拼 [...frameHistory, newCurrentFrame] 共最多 MAX_FRAMES 帧）
+			// 决策后把当前帧加入视觉历史（全量累积，不截断）。
+			// 下一步 decideAction 拼 [...frameHistory, newCurrentFrame]，
+			// 前缀帧命中 ollama prompt cache，只多编码当前新帧。
 			frameHistory.push(capture.base64);
-			while (frameHistory.length > MAX_FRAMES - 1) frameHistory.shift();
 
 
 			const act = decision.action;
