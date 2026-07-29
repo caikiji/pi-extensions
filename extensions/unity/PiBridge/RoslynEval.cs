@@ -1,33 +1,55 @@
 /*
  * RoslynEval — Roslyn-backed C# scripting for the `eval` command.
  *
- * Replaces the old reflection-based EvalExpression: instead of only being able
- * to call "Type.Method(args)", the agent can now submit any C# snippet —
- * expressions, multi-statement blocks, LINQ, loops, new GameObjects, AssetDatabase
- * queries, etc. — and it is compiled + executed on the Editor main thread with
- * full Unity API access.
+ * Compiles + executes arbitrary C# snippets on the Editor main thread with full
+ * Unity API access. See README.md → "Roslyn eval".
  *
- * Why a separate file: keeps the Roslyn dependency isolated here. PiBridge.cs's
- * `eval` case just calls RoslynEval.Run(code). The Roslyn DLLs (under
- * PiBridge/Roslyn/<version>/) are a compile+runtime dependency — unity_install_bridge
- * always provisions them. If a Unity version's Mono runtime rejects the shipped
- * DLLs at load time, Run() catches the load exception and returns a clear error
- * pointing to reinstall; the rest of the bridge keeps working.
+ * ─── Why CSharpCompilation + Assembly.Load, NOT CSharpScript ─────────────────
+ * The earlier implementation used Microsoft.CodeAnalysis.CSharp.Scripting's
+ * CSharpScript.Create/RunAsync. That path compiles fine but, at EXECUTION time,
+ * loads the emitted assembly via:
  *
- * Threading / async (v1 limitation):
- *   ExecuteCommand runs on the main thread (via EditorApplication.delayCall).
- *   CSharpScript.RunAsync returns a Task. Synchronous scripts (no await) complete
- *   before the Task is returned, so GetAwaiter().GetResult() returns instantly.
- *   Scripts that `await` something needing the main thread can deadlock (the main
- *   thread is blocked in GetResult and cannot run the continuation), or resume on
- *   a ThreadPool thread where Unity API calls would throw. Therefore async/await
- *   in eval scripts is UNSUPPORTED in v1 — write synchronous code. The DispatchToMainThread
- *   120s timeout still protects against runaway scripts.
+ *     Script.RunAsync
+ *       → ScriptBuilder.CreateExecutor
+ *         → InteractiveAssemblyLoader.LoadAssemblyFromStream
+ *           → CoreAssemblyLoaderImpl.LoadFromStream
+ *             → AssemblyLoadContext.LoadFromStream   ← only on .NET Core+
  *
- * State (v1): each eval is a fresh submission — no shared globals object, so
- * locals do not persist across calls. ScriptOptions is rebuilt every call so it
- * picks up the current AppDomain assemblies after a domain reload (Roslyn's own
- * caches are also wiped by reload, which is fine).
+ * Unity's Mono runtime has no System.Runtime.Loader.AssemblyLoadContext (that is
+ * a .NET Core+ API), so LoadFromStream throws NotImplementedException on EVERY
+ * eval — even `1+1`. The shipped Roslyn netstandard2.0 DLLs load fine (so
+ * BuildReferences / GetDiagnostics work), but the Scripting API's execution
+ * layer is unusable on Mono.
+ *
+ * Fix: drop the Scripting API entirely. Use the Compiler API directly:
+ *   CSharpSyntaxTree.ParseText → CSharpCompilation.Create → Emit(MemoryStream)
+ *   → Assembly.Load(byte[])          ← Mono supports this natively
+ *   → reflect the entry method, invoke, serialize the return value.
+ *
+ * This is the same approach used by community Unity Roslyn tools (e.g.
+ * CoplayDev/unity-mcp RoslynRuntimeCompiler) and works on every Unity Mono.
+ *
+ * ─── Return-value semantics (emulating CSharpScript) ────────────────────────
+ * The agent may submit either an expression ("1 + 2 * 3", "GameObject.Find(...)") 
+ * or a statement block ("var x = 5; Debug.Log(x);"). To give expressions a
+ * return value without forcing the agent to write a method, we wrap the user
+ * code in a generated static method and try two shapes:
+ *   1. expression mode : `return (object)(<code>);`           — works for expressions
+ *   2. statement mode  : `<code>; return null;`               — works for statement blocks
+ * We attempt expression mode first; if Roslyn reports compile errors that look
+ * like "not a valid expression" we fall back to statement mode. (Trying both and
+ * picking the one that compiles is simpler and more robust than syntax-walking.)
+ *
+ * ─── Threading ──────────────────────────────────────────────────────────────
+ * ExecuteCommand runs on the main thread (via EditorApplication.delayCall).
+ * Emit + Assembly.Load + Invoke are all synchronous; no await is used anywhere,
+ * so there is no deadlock surface (the old CSharpScript async caveat is gone).
+ * The DispatchToMainThread 120s timeout still protects against runaway scripts.
+ *
+ * ─── State ──────────────────────────────────────────────────────────────────
+ * Each eval is a fresh compilation + a fresh in-memory assembly. Locals do not
+ * persist across calls. References are rebuilt every call so they pick up the
+ * current AppDomain assemblies after a domain reload.
  *
  * Return value serialization: see SerializeReturnValue. Bounded + cycle-guarded
  * so a returned GameObject / scene graph can never produce an unbounded payload.
@@ -38,13 +60,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Collections.Immutable;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Scripting;
-using Microsoft.CodeAnalysis.Scripting;
+using Microsoft.CodeAnalysis.Emit;
 using UnityEditor;
 using UnityEngine;
 
@@ -52,6 +73,11 @@ namespace PiBridge
 {
     internal static class RoslynEval
     {
+        // Wrapper class name + entry method name we emit. Unique enough to avoid
+        // colliding with user code; the assembly is throwaway (loaded anon).
+        private const string WrapperTypeName = "__PiEvalWrapper";
+        private const string EntryMethodName = "__PiEval";
+
         // Cached set of well-known UnityEngine value types whose public fields
         // are all primitives — safe to let SimpleJson reflect directly so the
         // agent gets {"x":1,"y":2,"z":3} instead of a ToString capsule.
@@ -64,12 +90,24 @@ namespace PiBridge
             "Plane", "Ray", "Ray2D",
         };
 
+        // Default imports — mirror what CSharpScript's WithImports gave us.
+        private static readonly string[] _defaultUsings =
+        {
+            "System",
+            "System.IO",
+            "System.Linq",
+            "System.Collections.Generic",
+            "System.Reflection",
+            "UnityEngine",
+            "UnityEditor",
+        };
+
         public static Response Run(string code)
         {
-            ScriptOptions options;
+            List<MetadataReference> references;
             try
             {
-                options = BuildScriptOptions();
+                references = BuildReferences();
             }
             catch (Exception e)
             {
@@ -81,89 +119,280 @@ namespace PiBridge
                     ok = false,
                     error = "Roslyn eval is unavailable on this Unity runtime: " + e.GetType().Name + ": " + e.Message +
                             "\nReinstall via unity_install_bridge (it picks the Roslyn version for this Unity). " +
-                            "If it still fails, the project may need an older Unity or the reflection-based eval.",
+                            "If it still fails, the project may need an older Unity.",
                 };
             }
 
-            try
+            // Try expression mode first, then statement mode. Whichever compiles
+            // and emits cleanly is the one we run. If BOTH fail to compile, we
+            // return the expression-mode diagnostics (usually the more useful set
+            // for the agent, since expression mode surfaces "not an expression"
+            // errors that pinpoint the real issue).
+            CompilationResult exprResult = TryCompileAndEmit(references, code, expressionMode: true);
+            if (exprResult.compileErrors != null)
             {
-                // Create the script and force a compile so we get clean diagnostics
-                // (with line/col) rather than a wrapped CompilationErrorException.
-                Script<object> script = CSharpScript.Create(code, options);
-                Compilation compilation = script.GetCompilation();
-                var allDiag = compilation.GetDiagnostics();
-                var errors = allDiag.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
-                if (errors.Count > 0)
+                // Expression mode had compile errors — try statement mode.
+                CompilationResult stmtResult = TryCompileAndEmit(references, code, expressionMode: false);
+                if (stmtResult.compileErrors != null)
                 {
+                    // Both failed. Return expression-mode diagnostics (fall back to
+                    // statement-mode if expression-mode produced zero errors for
+                    // some reason but still didn't emit).
+                    CompilationResult reported = exprResult.compileErrors.Count > 0 ? exprResult : stmtResult;
                     return new Response
                     {
                         ok = false,
-                        error = "Compilation error: " + string.Join("  |  ", errors.Select(FormatDiagnostic)),
+                        error = "Compilation error: " + string.Join("  |  ", reported.compileErrors.Select(FormatDiagnostic)),
                         result = new
                         {
                             kind = "compile",
-                            diagnostics = errors.Select(FormatDiagnosticObject).ToArray(),
-                            warnings = allDiag.Where(d => d.Severity == DiagnosticSeverity.Warning).Take(20).Select(FormatDiagnosticObject).ToArray(),
+                            diagnostics = reported.compileErrors.Select(FormatDiagnosticObject).ToArray(),
+                            warnings = reported.warnings.Select(FormatDiagnosticObject).ToArray(),
+                            mode = "expression+statement both failed",
                         },
                     };
                 }
+                // Statement mode compiled — run it.
+                return ExecuteEmitted(stmtResult.assembly, stmtResult.assemblyName);
+            }
+            // Expression mode compiled — run it.
+            return ExecuteEmitted(exprResult.assembly, exprResult.assemblyName);
+        }
 
-                // Run on the main thread. For synchronous scripts the Task is
-                // already completed; GetResult returns at once. (See file header
-                // re: async being unsupported in v1.)
-                ScriptState<object> state;
+        // ─── Compilation ──────────────────────────────────────────────────────
+
+        private struct CompilationResult
+        {
+            public List<Diagnostic> compileErrors; // non-null => compilation FAILED (do not use assembly)
+            public List<Diagnostic> warnings;
+            public Assembly assembly;              // non-null => compilation succeeded
+            public string assemblyName;
+        }
+
+        private static CompilationResult TryCompileAndEmit(
+            List<MetadataReference> references, string code, bool expressionMode)
+        {
+            string assemblyName = "PiBridge.Eval." + Guid.NewGuid().ToString("N");
+            string methodBody = expressionMode
+                ? "return (object)(" + code + ");"
+                // Statement mode: ensure the user code ends with a statement
+                // terminator before appending 'return null;'. A missing ';'
+                // would merge the last user statement with 'return null;' and
+                // break compilation (e.g. 'throw new X(...)' + 'return null;').
+                // Extra ';' on already-terminated code is a harmless empty statement.
+                : (code.TrimEnd().EndsWith(";") || code.TrimEnd().EndsWith("}")
+                    ? code
+                    : code + ";") + "\nreturn null;";
+
+            string source =
+                "using System;" +
+                "using System.IO;" +
+                "using System.Linq;" +
+                "using System.Collections.Generic;" +
+                "using System.Reflection;" +
+                "using UnityEngine;" +
+                "using UnityEditor;" +
+                "namespace PiBridge.Dynamic { " +
+                "  internal class " + WrapperTypeName + " { " +
+                "    public static object " + EntryMethodName + "() { " +
+                "      " + methodBody +
+                "    } " +
+                "  } " +
+                "}";
+
+            Microsoft.CodeAnalysis.SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(source);
+            // Build options via the constructor — the With* chain (WithUsings/
+            // WithAllowUnsafe/WithOverflowChecks) exists on Roslyn 3.x+ but the
+            // constructor is the most portable shape across the v3.11/v4.0/v4.8
+            // DLL sets we ship. allowUnsafe:true lets agent scripts use pointers
+            // (e.g. NativeArray pinning); eval is already arbitrary code, so this
+            // adds no new risk surface.
+            var options = new CSharpCompilationOptions(
+                outputKind: OutputKind.DynamicallyLinkedLibrary,
+                checkOverflow: false,
+                allowUnsafe: true,
+                usings: _defaultUsings);
+
+            CSharpCompilation compilation = CSharpCompilation.Create(
+                assemblyName,
+                new[] { syntaxTree },
+                references,
+                options);
+
+            // Pre-check diagnostics so we get clean line/col on the USER code
+            // (Emit also reports diagnostics, but ParseText line numbers map to
+            // our wrapper; both map back to the same source, so this is fine).
+            var allDiag = compilation.GetDiagnostics().ToList();
+            var errors = allDiag.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+            var warnings = allDiag.Where(d => d.Severity == DiagnosticSeverity.Warning).ToList();
+
+            if (errors.Count > 0)
+            {
+                return new CompilationResult
+                {
+                    compileErrors = errors,
+                    warnings = warnings,
+                    assembly = null,
+                    assemblyName = assemblyName,
+                };
+            }
+
+            // Emit to a MemoryStream, then load via Assembly.Load(byte[]).
+            // Mono supports Assembly.Load(byte[]) natively — this is the whole
+            // reason we avoid CSharpScript (which uses AssemblyLoadContext).
+            using (var ms = new MemoryStream())
+            {
+                EmitResult emitResult;
                 try
                 {
-                    state = script.RunAsync().GetAwaiter().GetResult();
+                    emitResult = compilation.Emit(ms);
                 }
-                catch (CompilationErrorException cee)
+                catch (Exception e)
                 {
-                    // Defensive: pre-check above should have caught these, but
-                    // RunAsync can still throw if deferred diagnostics surface.
-                    // cee.Diagnostics is ImmutableArray<Diagnostic> (a struct,
-                    // never null but may be default/uninitialized) — normalize to
-                    // a safe IEnumerable<Diagnostic>.
-                    ImmutableArray<Diagnostic> diagsArr = cee.Diagnostics;
-                    IEnumerable<Diagnostic> diags = diagsArr.IsDefault ? Enumerable.Empty<Diagnostic>() : diagsArr;
-                    return new Response
+                    // Emit itself threw (rare — usually a reference problem).
+                    return new CompilationResult
                     {
-                        ok = false,
-                        error = "Compilation error (runtime): " + string.Join("  |  ", diags.Select(FormatDiagnostic)),
-                        result = new { kind = "compile", diagnostics = diags.Select(FormatDiagnosticObject).ToArray() },
+                        compileErrors = new List<Diagnostic>
+                        {
+                            MakeError("PIEVAL_EMIT", "Emit threw: " + e.GetType().Name + ": " + e.Message),
+                        },
+                        warnings = new List<Diagnostic>(),
+                        assembly = null,
+                        assemblyName = assemblyName,
                     };
                 }
 
-                object returnValue = state.ReturnValue;
-                return new Response
+                if (!emitResult.Success)
                 {
-                    ok = true,
-                    result = new
+                    var emitErrors = emitResult.Diagnostics
+                        .Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+                    var emitWarnings = emitResult.Diagnostics
+                        .Where(d => d.Severity == DiagnosticSeverity.Warning).ToList();
+                    return new CompilationResult
                     {
-                        value = SerializeReturnValue(returnValue, new HashSet<object>(ReferenceComparer)),
-                        type = returnValue?.GetType().FullName,
-                        hasReturnValue = returnValue != null || HasTrailingValue(state),
-                    },
-                };
-            }
-            catch (Exception e)
-            {
-                // Unwrap common reflection-invoked exceptions for cleaner messages.
-                string stack = e.StackTrace;
-                return new Response
+                        compileErrors = emitErrors.Count > 0 ? emitErrors : errors,
+                        warnings = emitWarnings.Count > 0 ? emitWarnings : warnings,
+                        assembly = null,
+                        assemblyName = assemblyName,
+                    };
+                }
+
+                byte[] assemblyBytes = ms.ToArray();
+                Assembly asm;
+                try
                 {
-                    ok = false,
-                    error = "eval threw " + e.GetType().Name + ": " + e.Message,
-                    result = new { kind = "runtime", type = e.GetType().FullName, stack = Truncate(stack, 4000) },
+                    asm = Assembly.Load(assemblyBytes);
+                }
+                catch (Exception e)
+                {
+                    return new CompilationResult
+                    {
+                        compileErrors = new List<Diagnostic>
+                        {
+                            MakeError("PIEVAL_LOAD", "Assembly.Load threw: " + e.GetType().Name + ": " + e.Message),
+                        },
+                        warnings = new List<Diagnostic>(),
+                        assembly = null,
+                        assemblyName = assemblyName,
+                    };
+                }
+
+                return new CompilationResult
+                {
+                    compileErrors = null,
+                    warnings = warnings,
+                    assembly = asm,
+                    assemblyName = assemblyName,
                 };
             }
         }
 
-        // Build ScriptOptions from the currently-loaded assemblies. The Editor
-        // AppDomain at eval time has UnityEngine/UnityEditor, all package and
-        // user assemblies loaded — so the script can reference any of them.
+        // Fabricate a DiagnosticDescriptor for emit/load failures (which aren't
+        // syntax errors) so they flow through the same formatting pipeline as
+        // real Roslyn diagnostics. DiagnosticDescriptor is sealed, so we
+        // construct it directly rather than subclassing.
+        private static Diagnostic MakeError(string id, string message)
+        {
+            var descriptor = new DiagnosticDescriptor(
+                id: id,
+                title: "PiBridge eval",
+                messageFormat: message,
+                category: "PiBridge",
+                defaultSeverity: DiagnosticSeverity.Error,
+                isEnabledByDefault: true);
+            return Diagnostic.Create(descriptor, Location.None);
+        }
+
+        // ─── Execution ────────────────────────────────────────────────────────
+
+        private static Response ExecuteEmitted(Assembly asm, string assemblyName)
+        {
+            Type wrapperType = asm.GetType("PiBridge.Dynamic." + WrapperTypeName);
+            if (wrapperType == null)
+            {
+                return new Response
+                {
+                    ok = false,
+                    error = "Internal eval error: wrapper type not found in emitted assembly.",
+                };
+            }
+            MethodInfo entry = wrapperType.GetMethod(EntryMethodName, BindingFlags.Public | BindingFlags.Static);
+            if (entry == null)
+            {
+                return new Response
+                {
+                    ok = false,
+                    error = "Internal eval error: entry method not found on wrapper type.",
+                };
+            }
+
+            object returnValue;
+            try
+            {
+                returnValue = entry.Invoke(null, null);
+            }
+            catch (TargetInvocationException tie)
+            {
+                // The user's code threw. Unwrap to the real exception for a clean message.
+                Exception real = tie.InnerException ?? tie;
+                return new Response
+                {
+                    ok = false,
+                    error = "eval threw " + real.GetType().Name + ": " + real.Message,
+                    result = new { kind = "runtime", type = real.GetType().FullName, stack = Truncate(real.StackTrace, 4000) },
+                };
+            }
+            catch (Exception e)
+            {
+                return new Response
+                {
+                    ok = false,
+                    error = "eval invocation failed: " + e.GetType().Name + ": " + e.Message,
+                    result = new { kind = "runtime", type = e.GetType().FullName, stack = Truncate(e.StackTrace, 4000) },
+                };
+            }
+
+            return new Response
+            {
+                ok = true,
+                result = new
+                {
+                    value = SerializeReturnValue(returnValue, new HashSet<object>(ReferenceComparer)),
+                    type = returnValue?.GetType().FullName,
+                    hasReturnValue = returnValue != null,
+                    mode = "compiler-api",
+                },
+            };
+        }
+
+        // ─── References ───────────────────────────────────────────────────────
+        //
+        // Build MetadataReferences from the currently-loaded assemblies. The
+        // Editor AppDomain at eval time has UnityEngine/UnityEditor, all package
+        // and user assemblies loaded — so the script can reference any of them.
         // Filtering: skip dynamic assemblies (no Location) and assemblies whose
         // Location throws or is empty (some Mono reflection-emit assemblies).
-        private static ScriptOptions BuildScriptOptions()
+        private static List<MetadataReference> BuildReferences()
         {
             var refs = new List<MetadataReference>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -181,20 +410,7 @@ namespace PiBridge
                 }
                 catch { /* Location access can throw on some assemblies */ }
             }
-
-            return ScriptOptions.Default
-                .WithReferences(refs)
-                .WithImports(
-                    "System",
-                    "System.IO",
-                    "System.Linq",
-                    "System.Collections.Generic",
-                    "System.Reflection",
-                    "UnityEngine",
-                    "UnityEditor"
-                )
-                .WithEmitDebugInformation(false)
-                .WithLanguageVersion(LanguageVersion.Latest);
+            return refs;
         }
 
         // ─── Return-value serialization ───────────────────────────────────────
@@ -222,8 +438,20 @@ namespace PiBridge
             if (t == typeof(string) || t.IsPrimitive || t == typeof(decimal) || t.IsEnum)
                 return value;
 
-            // Common Unity value types: SimpleJson reflects their primitive fields.
-            if (IsUnityValueType(t)) return value;
+            // Common Unity value types (Vector3, Color, Rect, ...): convert to a
+            // dictionary of their primitive public fields ourselves. We must NOT
+            // passthrough the raw value to SimpleJson — SimpleJson's object branch
+            // reflects public PROPERTIES too, and Vector3.normalized returns a
+            // Vector3, causing infinite recursion (stack overflow / hang).
+            if (IsUnityValueType(t))
+            {
+                var dict = new Dictionary<string, object>();
+                foreach (var field in t.GetFields(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    dict[field.Name] = SerializeReturnValue(field.GetValue(value), visited, depth + 1);
+                }
+                return dict;
+            }
 
             // Collections (but not string, already handled).
             if (value is IEnumerable)
@@ -340,15 +568,6 @@ namespace PiBridge
         }
 
         // ─── Small helpers ─────────────────────────────────────────────────────
-
-        // ScriptState has no public "was there a trailing value?" flag; a null
-        // ReturnValue is ambiguous (script returned null, or had no trailing
-        // expression). Treat null return as "no value" for the hasReturnValue flag
-        // — the agent can still read the type (null) if it cares.
-        private static bool HasTrailingValue(ScriptState<object> state)
-        {
-            return state.ReturnValue != null;
-        }
 
         private static string Truncate(string s, int max)
         {
