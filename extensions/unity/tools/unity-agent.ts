@@ -7,8 +7,8 @@
  * 两种模式：
  *   - observe: 截取当前画面 → 送 MiniCPM-V 分析 → 返回文本描述。一次调用，不做操作。
  *   - run_task: 在 Play Mode 中循环 截图→分析→操作 直到任务完成。每步视觉决策走
- *     ollama format schema（强制 JSON），输入注入走 eval 内联 Win32 keybd_event/mouse_event。
- *
+ *     ollama format schema（强制 JSON），输入注入走 AgentInput（反射操作游戏对象，
+ *     不捕获 OS 鼠标键盘）；click 例外回退 Win32 mouse_event。
  * 截图走 PiBridge eval 内联 RenderTexture（不新增 bridge 命令），视觉分析走
  * ollama /api/generate + format schema 强制 JSON。详见：
  *   - lib/vision-client.ts
@@ -20,7 +20,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { discoverBridge, sendCommand, waitForBridge, type BridgeInfo } from "../lib/bridge-client.ts";
-import { actionToSteps, type ActionStep } from "../lib/action-map.ts";
+import { actionToAgentInputSteps, type ActionStep } from "../lib/action-map.ts";
 import {
 	askVision,
 	captureScreen,
@@ -202,15 +202,17 @@ async function runObserve(
 }
 
 // ─── run_task 模式 ──────────────────────────────────────────────────────
-//
-// 循环：执行 action（eval Win32 注入）→ 等画面稳定 → 截图 → decideAction
-//       （ollama schema）→ 判断 status。
+// 循环：TakeOver 接管（释放 OS 鼠标）→ 每步 截图→decideAction（ollama schema）
+//       → 执行 action（AgentInput.Move/Turn/Jump/Interact eval，不碰 OS 输入）
+//       → finally Release 恢复。
 //
 // 关键设计（见提案 Phase 0/0.5）：
 //   - 超时策略：工具内部跑，超时返回 incomplete。Unity 画面即持久状态，
 //     Pi 用新的 unity_agent run_task 调用即可续跑，无需 session 管理。
 //   - 崩溃检测：每步 capture 返回的 isPlaying，false 则中止返回 crashed。
-//   - 视觉决策走 schema（action 枚举合法），输入注入走 action-map.ts。
+//   - 视觉决策走 schema（action 枚举合法），输入注入走 AgentInput（action-map.ts）。
+//   - 不捕获用户鼠标键盘：TakeOver(false) 完全接管模式，禁用游戏 PlayerController
+//     + 强制 Cursor.lockState=None，用户可随意动鼠标键盘，互不影响。
 //   - 每步含历史上下文，让模型知道之前做了什么。
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -227,9 +229,36 @@ async function runTask(
 	// 硬超时：留给每步 ~4s（注入+截图+视觉），加缓冲。最多跑到 maxSteps 或 85s。
 	const HARD_TIMEOUT_MS = 85000;
 	const port = bridge.port!;
+	// AgentInput 接管状态：run_task 开始时 TakeOver（禁用游戏 PlayerController +
+	// 释放 OS 鼠标，不捕获用户输入），结束/异常时 Release 恢复。用标志位让 finally
+	// 知道是否需要 Release（TakeOver 失败则不需要）。
+	let tookOver = false;
 
-	for (let step = 1; step <= maxSteps; step++) {
-		const stepStart = Date.now();
+	try {
+		// 接管输入：完全接管模式（allowPlayerControl=false），不捕获用户鼠标键盘。
+		// 重试机制：Play Mode 刚进入时场景对象可能未就绪，TakeOver 首次探测会失败，
+		// 等 500ms 重试一次（已知时机问题，后续用 playModeStateChanged 钙子优化）。
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				const resp = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.TakeOver()" }, 15000);
+				if (resp.ok && typeof resp.result?.value === "string" && resp.result.value.includes("playerController=True")) {
+					tookOver = true;
+					break;
+				}
+				// 探测未就绪（playerController=False），等一会重试
+				await sleep(500);
+			} catch (e) {
+				// eval 异常（bridge 可能 reload 中），等一会重试
+				await sleep(500);
+			}
+		}
+		if (!tookOver) {
+			return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "crashed",
+				"AgentInput.TakeOver() 接管失败——Play Mode 场景对象未就绪或 AgentInput 未安装。确保已 install bridge 并进入 Play Mode。", totalStart);
+		}
+
+		for (let step = 1; step <= maxSteps; step++) {
+			const stepStart = Date.now();
 
 			// 检查总超时
 			if (Date.now() - totalStart > HARD_TIMEOUT_MS) {
@@ -282,8 +311,8 @@ async function runTask(
 					act.reason, totalStart);
 			}
 
-			// 3. 执行 action（可能多步：keydown→等→keyup）
-			const steps = actionToSteps(act);
+			// 3. 执行 action（AgentInput 版：一次 eval 调用 Move/Turn/Jump/Interact）
+			const steps = actionToAgentInputSteps(act);
 			for (const s of steps) {
 				try {
 					const resp = await sendCommand(port, "eval", { code: s.code }, 30000);
@@ -301,11 +330,22 @@ async function runTask(
 			}
 
 			history.push({ action: act.action, result: `执行了 ${steps.map((s) => s.label).join(",")}` });
-	}
+		}
 
-	// 跑完 maxSteps 还没 success/stuck
-	return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
-		`达到最大步数 ${maxSteps}，任务未完成。可用新的 unity_agent run_task 调用续跑。`, totalStart);
+		// 跑完 maxSteps 还没 success/stuck
+		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
+			`达到最大步数 ${maxSteps}，任务未完成。可用新的 unity_agent run_task 调用续跑。`, totalStart);
+	} finally {
+		// 无论任务如何结束（success/incomplete/crashed/异常），都释放输入控制权，
+		// 恢复游戏 PlayerController + 鼠标状态。这是“不捕获用户鼠标键盘”的关键保障。
+		if (tookOver) {
+			try {
+				await sendCommand(port, "eval", { code: "PiBridge.AgentInput.Release()" }, 10000);
+			} catch {
+				// Release 失败不阻塞结果返回（bridge 可能已不可用）
+			}
+		}
+	}
 }
 
 // 组装 run_task 的返回结果。result 里含完整的步骤记录，方便 Agent 续跑或诊断。
