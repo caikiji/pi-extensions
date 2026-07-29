@@ -103,6 +103,39 @@ namespace PiBridge
             "UnityEditor",
         };
 
+        // User-project namespaces auto-discovered from loaded assemblies
+        // (Assembly-CSharp, Assembly-CSharp-Editor, etc.). Cached on first use.
+        // This lets eval reference game-defined types like RPG.PlayerController
+        // without the agent having to fully-qualify them. Only non-system
+        // assemblies are scanned (System/Unity/NUnit namespaces are already in
+        // _defaultUsings or not useful to import wholesale).
+        // Not cached: Assembly-CSharp may load after the first eval call (domain
+        // reload timing), and caching a pre-load snapshot would miss game
+        // namespaces permanently. GetTypes on user assemblies is cheap enough
+        // to run per eval (few dozen types typically).
+        private static string[] GetUsings()
+        {
+            var ns = new System.Collections.Generic.HashSet<string>();
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                string name = asm.GetName().Name;
+                if (!name.StartsWith("Assembly-CSharp")) continue;
+                try
+                {
+                    foreach (var t in asm.GetTypes())
+                    {
+                        string n = t.Namespace;
+                        if (!string.IsNullOrEmpty(n) && n.Length <= 60) ns.Add(n);
+                    }
+                }
+                catch { /* GetTypes can throw on some assemblies */ }
+            }
+            var result = new string[_defaultUsings.Length + ns.Count];
+            _defaultUsings.CopyTo(result, 0);
+            int i = _defaultUsings.Length;
+            foreach (var n in ns) result[i++] = n;
+            return result;
+        }
         public static Response Run(string code)
         {
             List<MetadataReference> references;
@@ -204,14 +237,15 @@ namespace PiBridge
                 };
             }
 
+            // Build the using block from default + auto-discovered user namespaces.
+            // We emit usings in the SOURCE (not just CSharpCompilationOptions.usings)
+            // because source-level usings are reliable across Roslyn versions; the
+            // options.usings field has been observed to not import in some 3.x builds.
+            var usings = GetUsings();
+            var usingSb = new System.Text.StringBuilder();
+            foreach (var u in usings) usingSb.Append("using ").Append(u).Append(";");
             string source =
-                "using System;" +
-                "using System.IO;" +
-                "using System.Linq;" +
-                "using System.Collections.Generic;" +
-                "using System.Reflection;" +
-                "using UnityEngine;" +
-                "using UnityEditor;" +
+                usingSb.ToString() +
                 "namespace PiBridge.Dynamic { " +
                 "  internal class " + WrapperTypeName + " { " +
                 "    public static object " + EntryMethodName + "() { " +
@@ -231,7 +265,7 @@ namespace PiBridge
                 outputKind: OutputKind.DynamicallyLinkedLibrary,
                 checkOverflow: false,
                 allowUnsafe: true,
-                usings: _defaultUsings);
+                usings: GetUsings());
 
             CSharpCompilation compilation = CSharpCompilation.Create(
                 assemblyName,

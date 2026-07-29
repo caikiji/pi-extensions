@@ -260,9 +260,12 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const details = result.details as UnityInstallBridgeResult | undefined;
 			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
+			const hasErrors = details.compileErrors && details.compileErrors.length > 0;
+			const prefix = hasErrors ? theme.fg("error", `✗ installed (COMPILE ERRORS) `) : theme.fg("success", `✓ installed `);
 			return new Text(
-				theme.fg("success", `✓ installed `) + theme.fg("accent", `v${details.version}`) +
-					theme.fg("dim", ` → ${details.installedPath.replace(/\\/g, "/")}`),
+				prefix + theme.fg("accent", `v${details.version}`) +
+					theme.fg("dim", ` → ${details.installedPath.replace(/\\/g, "/")}`) +
+					(hasErrors ? theme.fg("error", ` ⚠ ${details.compileErrors!.length} errors`) : ""),
 				0,
 				0,
 			);
@@ -487,6 +490,12 @@ function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 		lines.push(`  • ${f.replace(/\\/g, "/")}`);
 	}
 	lines.push("");
+	if (result.compileErrors && result.compileErrors.length > 0) {
+		lines.push(`⚠ ${result.compileErrors.length} COMPILE ERROR(S) — new PiBridge.cs did NOT compile, bridge is running STALE code:`);
+		for (const e of result.compileErrors.slice(0, 5)) lines.push(`  ✗ ${e}`);
+		if (result.compileErrors.length > 5) lines.push(`  ... and ${result.compileErrors.length - 5} more`);
+		lines.push("");
+	}
 	lines.push("Next steps:");
 	for (const step of result.nextSteps) {
 		lines.push(`  • ${step}`);

@@ -55,6 +55,10 @@ export interface UnityInstallBridgeResult {
 	// should retry ping/commands shortly, or focus the Unity window to speed it up.
 	bridgeReady: boolean;
 	bridgeWaitMs: number;
+	// Compile errors detected after install-triggered recompile (CSxxxx).
+	// If non-empty, the new PiBridge.cs failed to compile — bridge may be
+	// running stale code. Agent/user must fix before relying on new features.
+	compileErrors: string[];
 }
 
 // Resolve the extension's own directory at runtime so we can read the bundled
@@ -210,6 +214,7 @@ export async function runUnityInstallBridge(
 	const unityLikelyOpen = preInstall.available || portFileExists;
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
+	let compileErrors: string[] = [];
 	if (unityLikelyOpen) {
 		// Kick off the reload NOW (while the bridge is still up) so the wait
 		// below reliably sees the offline→online transition. Without this, the
@@ -229,6 +234,34 @@ export async function runUnityInstallBridge(
 		bridgeWaitMs = waited.waitedMs;
 		if (bridgeReady) {
 			nextSteps.push(`Bridge confirmed back online after ${Math.round(bridgeWaitMs / 1000)}s. unity_command is ready.`);
+			// Check for compile errors (CSxxxx). Unity can report "bridge online"
+			// even when the new PiBridge.cs failed to compile — the bridge runs
+			// stale code from the last good build. Surface this so the agent/user
+			// doesn't waste time testing a change that never took effect.
+			try {
+				const logResp = await sendCommand<{ entries?: { message?: string; file?: string; line?: number }[] }>(
+					waited.bridge.port!,
+					"log",
+					{ count: 50, severity: "error" },
+					15000,
+				);
+				if (logResp.ok && logResp.result?.entries) {
+					// CSxxxx = C# compile errors. Exclude the known Roslyn DLL load
+					// warnings about System.Runtime.Loader (those don't block compile).
+					compileErrors = logResp.result.entries
+						.map((e) => e.message?.split("\n")[0] ?? "")
+						.filter((msg) => /CS\d{4}/.test(msg) && !msg.includes("System.Runtime.Loader"));
+					if (compileErrors.length > 0) {
+						nextSteps.push(
+							`⚠ ${compileErrors.length} compile error(s) detected after recompile! The new PiBridge.cs did NOT compile — bridge is running stale code.`,
+						);
+						for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  • ${e}`);
+						nextSteps.push("Fix the errors in PiBridge.cs and reinstall, or check unity_command log for details.");
+					}
+				}
+			} catch {
+				// log query failed — non-fatal, bridge is still usable
+				}
 		} else {
 			nextSteps.push(
 				`⚠ Bridge did not come back online within ${Math.round(bridgeWaitMs / 1000)}s. `
@@ -252,5 +285,6 @@ export async function runUnityInstallBridge(
 		nextSteps,
 		bridgeReady,
 		bridgeWaitMs,
+		compileErrors,
 	};
 }
