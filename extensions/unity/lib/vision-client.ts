@@ -252,13 +252,17 @@ export async function decideAction(
 ${historyText}
 
 当前画面见附图。决定下一步动作。规则:
-- 每步只选一个原子动作，不能组合（如不能 "turn_right then move_forward"）
-- move_forward / move_backward: 前后移动，params 用 duration_ms（毫秒）
-- turn_left / turn_right: 转向，params 用 duration_ms
+- 每步只选一个原始动作，不能组合（如不能 "turn_right then move_forward"）
+- move_forward / move_backward: 前后移动，params 用 duration_ms（毫秒），建议 500-2000
+- turn_left / turn_right: 转向（每次约 30-45 度），params 用 duration_ms，建议 200
 - click: 点击屏幕位置，params 用 x,y（相对坐标 0~1）
 - interact / jump: params 留空 {}
 - wait: params 用 duration_ms
-- status: 任务完成用 success，无法推进用 stuck，否则 ongoing`;
+- **status 判断很重要**:
+  - 如果当前画面已经满足任务目标（或已明显达成），必须返回 status=success
+  - 如果任务无法推进（卡住、无法判断），返回 status=stuck
+  - 否则返回 status=ongoing
+- 不要过度执行：任务达成后立即 success，不要继续动作`;
 
 	const url = `${OLLAMA_BASE_URL}/api/generate`;
 	const t0 = Date.now();
