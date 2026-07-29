@@ -178,8 +178,12 @@ export async function runUnityInstallBridge(
 				try { unlinkSync(join(runtimeTargetDir, existing)); } catch { /* best-effort */ }
 			}
 		}
-		for (const file of runtimeSourceFiles) {
+		// .cs 总是覆盖（代码更新），其他资源文件（.txt/.json 等可自定义配置）
+		// 已存在则跳过——保留项目本地修改，install 不会重置用户自定义的 prompt 等。
+		const allSourceFiles = readdirSync(agentRuntimeSourceDir);
+		for (const file of allSourceFiles) {
 			const targetPath = join(runtimeTargetDir, file);
+			if (!file.endsWith(".cs") && existsSync(targetPath)) continue;  // 保留已有资源
 			writeFileSync(targetPath, readFileSync(join(agentRuntimeSourceDir, file), "utf-8"), "utf-8");
 			installedFiles.push(targetPath);
 			runtimeScriptsCopied++;
