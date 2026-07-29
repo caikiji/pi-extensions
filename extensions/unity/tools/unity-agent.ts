@@ -351,7 +351,6 @@ async function runTask(
 					return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, "incomplete",
 						`输入注入异常（第 ${step} 步）: ${(e as Error).message}`, totalStart);
 				}
-				await sleep(s.waitMs);
 			}
 
 			history.push({ action: act.action, result: `执行了 ${steps.map((s) => s.label).join(",")}` });
