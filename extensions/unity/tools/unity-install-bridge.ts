@@ -30,10 +30,15 @@ export const unityInstallBridgeParams = Type.Object({
 		description:
 			"Path to the Unity project root (the folder containing Assets/ and ProjectSettings/). The bridge files will be installed to <projectPath>/Assets/Editor/PiBridge/.",
 	}),
+	bridgeSourcePath: Type.Optional(Type.String({
+		description:
+			"Optional path to a PiBridge source directory (the folder containing PiBridge.cs, RoslynEval.cs, etc., and a Roslyn/ subfolder). Defaults to the PiBridge/ directory bundled with this extension. Use this to install a custom/development build of PiBridge instead of the bundled one — e.g. when iterating on bridge C# code from a local checkout without repackaging the extension.",
+	})),
 });
 
 export interface UnityInstallBridgeParams {
 	projectPath: string;
+	bridgeSourcePath?: string;
 }
 
 export interface UnityInstallBridgeResult {
@@ -84,13 +89,18 @@ export async function runUnityInstallBridge(
 		);
 	}
 
-	// 2. Locate the bundled PiBridge source directory
+	// 2. Locate the PiBridge source directory. Default to the bundled one;
+	//   allow an explicit override for development/custom builds.
 	const extensionDir = getExtensionDir();
-	const bridgeSourceDir = join(extensionDir, "PiBridge");
+	const bridgeSourceDir = params.bridgeSourcePath
+		? resolve(params.bridgeSourcePath)
+		: join(extensionDir, "PiBridge");
 	if (!existsSync(bridgeSourceDir)) {
 		throw new Error(
-			`Bundled PiBridge/ directory not found at: ${bridgeSourceDir}\n` +
-				"The extension installation may be incomplete.",
+			`PiBridge/ directory not found at: ${bridgeSourceDir}\n` +
+				(params.bridgeSourcePath
+					? "The provided bridgeSourcePath does not exist. Check the path, or omit it to use the bundled PiBridge."
+					: "The extension installation may be incomplete."),
 		);
 	}
 	const sourceFiles = readdirSync(bridgeSourceDir).filter((f) => f.endsWith(".cs"));
