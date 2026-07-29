@@ -466,11 +466,13 @@ namespace PiBridge
             bool hasInput = s_virtualMove.sqrMagnitude > 0.01f;
             if (hasInput)
             {
-                // 相机朝向：优先 PlayerController 的 cameraTransform（若反射读得到），否则 Camera.main
-                float camYaw = 0f;
-                Camera cam = Camera.main;
-                if (cam != null) camYaw = cam.transform.eulerAngles.y;
-                float targetAngle = Mathf.Atan2(s_virtualMove.x, s_virtualMove.y) * Mathf.Rad2Deg + camYaw;
+                // 移动方向相对角色当前朝向（W=角色前方，S=后方，A=左，D=右）。
+                // 不用相机 yaw——相机跟随角色朝向，用相机 yaw 会形成循环依赖
+                // （相机追角色→角色追相机）导致快速旋转。
+                float charYaw = s_playerController != null
+                    ? s_playerController.transform.eulerAngles.y
+                    : 0f;
+                float targetAngle = Mathf.Atan2(s_virtualMove.x, s_virtualMove.y) * Mathf.Rad2Deg + charYaw;
                 moveDir = Quaternion.Euler(0f, targetAngle, 0f) * Vector3.forward;
                 moveDir = moveDir.normalized;
 
