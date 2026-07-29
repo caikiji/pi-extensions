@@ -734,14 +734,12 @@ namespace PiBridge
         // 项目可直接编辑 AgentPrompt.txt，或调 SetDecisionPrompt，改了无需 reload pi 扩展。
         private static string s_decisionPrompt;
 
+        // 不缓存：每次读文件，这样项目编辑 AgentPrompt.txt 立即生效，无需 domain reload。
+        // 文件读取很快，每步一次无妨。
         public static string GetDecisionPrompt()
         {
-            if (s_decisionPrompt == null)
-            {
-                try { s_decisionPrompt = System.IO.File.ReadAllText(PromptFilePath); }
-                catch { s_decisionPrompt = "当前画面见附图。决定下一步动作。"; }
-            }
-            return s_decisionPrompt;
+            try { return System.IO.File.ReadAllText(PromptFilePath); }
+            catch { return "当前画面见附图。决定下一步动作。"; }
         }
 
         public static string SetDecisionPrompt(string prompt)
