@@ -25,6 +25,9 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { parseUnityVersion, readProjectVersion } from "../lib/project-version.ts";
 import { discoverBridge, sendCommand, waitForBridge } from "../lib/bridge-client.ts";
+import { getGlobalEditorLogPath, readLogByPath, readLogByPathFromOffset } from "../lib/editor-log.ts";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const unityInstallBridgeParams = Type.Object({
 	projectPath: Type.String({
@@ -55,6 +58,14 @@ export interface UnityInstallBridgeResult {
 	// should retry ping/commands shortly, or focus the Unity window to speed it up.
 	bridgeReady: boolean;
 	bridgeWaitMs: number;
+	// Compile errors detected after install-triggered recompile (CSxxxx).
+	// If non-empty, the new PiBridge.cs failed to compile — bridge may be
+	// running stale code. Agent/user must fix before relying on new features.
+	compileErrors: string[];
+	// Number of runtime agent scripts (AgentRuntime/*.cs) copied to
+	// Assets/Scripts/AgentInput/. These are #if UNITY_EDITOR-gated runtime
+	// MonoBehaviours for agent input takeover — stripped from packaged builds.
+	runtimeScriptsCopied: number;
 }
 
 // Resolve the extension's own directory at runtime so we can read the bundled
@@ -127,8 +138,17 @@ export async function runUnityInstallBridge(
 	const bridgeDir = join(editorDir, "PiBridge");
 	mkdirSync(bridgeDir, { recursive: true });
 
-	// 4. Copy each .cs file into the subfolder, overwriting any existing file
+	// 4. Copy each .cs file into the subfolder, overwriting any existing file.
+	//    Also remove stale .cs in the target that aren't in the source anymore
+	//    (e.g. a file renamed/moved out of the source tree), so a reinstall
+	//    doesn't leave orphaned scripts that could fail to compile.
 	const installedFiles: string[] = [];
+	const sourceFileSet = new Set(sourceFiles);
+	for (const existing of readdirSync(bridgeDir).filter((f) => f.endsWith(".cs"))) {
+		if (!sourceFileSet.has(existing)) {
+			try { unlinkSync(join(bridgeDir, existing)); } catch { /* best-effort */ }
+		}
+	}
 	for (const file of sourceFiles) {
 		const targetPath = join(bridgeDir, file);
 		const content = readFileSync(join(bridgeSourceDir, file), "utf-8");
@@ -136,6 +156,39 @@ export async function runUnityInstallBridge(
 		installedFiles.push(targetPath);
 	}
 
+	// 4b. Copy runtime agent scripts (AgentRuntime/*.cs) to Assets/Scripts/AgentInput/.
+	//     These are runtime MonoBehaviours (#if UNITY_EDITOR-gated) that the agent
+	//     uses to take over game input in Play Mode — they must live OUTSIDE the
+	//     Editor/ folder so they can be AddComponent'd and run LateUpdate in Play
+	//     Mode. The whole class is wrapped in #if UNITY_EDITOR, so it's stripped
+	//     from non-Editor builds (never ships in the packaged app).
+	const agentRuntimeSourceDir = join(bridgeSourceDir, "AgentRuntime");
+	let runtimeScriptsCopied = 0;
+	if (existsSync(agentRuntimeSourceDir)) {
+		const runtimeTargetDir = join(projectPath, "Assets", "Scripts", "AgentInput");
+		mkdirSync(runtimeTargetDir, { recursive: true });
+		// Remove stale .cs in the target that aren't in the source anymore, so an
+		// uninstall/reinstall doesn't leave orphaned runtime scripts that could
+		// fail to compile (e.g. a renamed file).
+		const runtimeSourceFiles = new Set(
+			readdirSync(agentRuntimeSourceDir).filter((f) => f.endsWith(".cs")),
+		);
+		for (const existing of readdirSync(runtimeTargetDir).filter((f) => f.endsWith(".cs"))) {
+			if (!runtimeSourceFiles.has(existing)) {
+				try { unlinkSync(join(runtimeTargetDir, existing)); } catch { /* best-effort */ }
+			}
+		}
+		// .cs 总是覆盖（代码更新），其他资源文件（.txt/.json 等可自定义配置）
+		// 已存在则跳过——保留项目本地修改，install 不会重置用户自定义的 prompt 等。
+		const allSourceFiles = readdirSync(agentRuntimeSourceDir);
+		for (const file of allSourceFiles) {
+			const targetPath = join(runtimeTargetDir, file);
+			if (!file.endsWith(".cs") && existsSync(targetPath)) continue;  // 保留已有资源
+			writeFileSync(targetPath, readFileSync(join(agentRuntimeSourceDir, file), "utf-8"), "utf-8");
+			installedFiles.push(targetPath);
+			runtimeScriptsCopied++;
+		}
+	}
 	// 5. Copy the Roslyn C# scripting DLLs matching this project's Unity version.
 	//    Required by the `eval` command — without them PiBridge.cs would fail to
 	//    compile (RoslynEval.cs references Microsoft.CodeAnalysis.CSharp.Scripting).
@@ -191,6 +244,11 @@ export async function runUnityInstallBridge(
 	} else {
 		nextSteps.push(
 			`eval is ready: Roslyn ${roslynVersion} (${roslynDllsCopied} DLLs) copied — eval is enabled by default (no opt-in env var needed).`
+	)
+	}
+	if (runtimeScriptsCopied > 0) {
+		nextSteps.push(
+			`Agent input takeover ready: ${runtimeScriptsCopied} runtime script(s) copied to Assets/Scripts/AgentInput/ — #if UNITY_EDITOR-gated, stripped from packaged builds.`,
 		);
 	}
 
@@ -210,6 +268,36 @@ export async function runUnityInstallBridge(
 	const unityLikelyOpen = preInstall.available || portFileExists;
 	let bridgeReady = false;
 	let bridgeWaitMs = 0;
+	let compileErrors: string[] = [];
+	// Editor.log persists across domain reloads (unlike Unity Console, which
+	// gets wiped). We read it after install to detect CS compile errors.
+	// IMPORTANT: read only the bytes APPENDED after install, not tail(N) lines —
+	// Unity writes a flood of RefreshProfiler lines AFTER compile, so the last
+	// 100 lines are usually refresh spam and the CS errors (which happened
+	// earlier, during compile) have already scrolled out of a small tail window.
+	// Worse, Editor.log retains errors from PREVIOUS installs, so a larger tail
+	// would report stale errors as if they were new. Byte-offset slicing reads
+	// exactly the new compile output, multi-byte safe (slices bytes, not chars).
+	const editorLogPath = getGlobalEditorLogPath();
+	let editorLogOffset = 0;
+	if (editorLogPath) {
+		const pre = readLogByPath(editorLogPath);
+		if (pre.exists) editorLogOffset = pre.sizeBytes;
+	}
+	// Also snapshot the bridge's startedAt (if the running bridge supports it)
+	// so we can verify after install that the bridge actually restarted with the
+	// new code, not stale code from a failed compile. startedAt is a UTC ticks
+	// string; if absent (old bridge), we fall back to "unknown".
+	let preStartedAt: string | null = null;
+	if (preInstall.available) {
+		try {
+			const pingRes = await sendCommand<{ startedAt?: string }>(preInstall.port!, "ping", {}, 8000);
+			const sa = pingRes?.result?.startedAt;
+			if (typeof sa === "string") preStartedAt = sa;
+		} catch { /* bridge may be mid-teardown; non-fatal */ }
+	}
+
+
 	if (unityLikelyOpen) {
 		// Kick off the reload NOW (while the bridge is still up) so the wait
 		// below reliably sees the offline→online transition. Without this, the
@@ -229,6 +317,69 @@ export async function runUnityInstallBridge(
 		bridgeWaitMs = waited.waitedMs;
 		if (bridgeReady) {
 			nextSteps.push(`Bridge confirmed back online after ${Math.round(bridgeWaitMs / 1000)}s. unity_command is ready.`);
+			// Check for compile errors (CSxxxx). Unity can report "bridge online"
+			// even when the new PiBridge.cs failed to compile — the bridge runs
+			// stale code from the last good build. Surface this so the agent/user
+			// doesn't waste time testing a change that never took effect.
+			// Check for compile errors via Editor.log (NOT Unity Console — domain
+			// reload wipes the Console, hiding CS errors that happened during
+			// compile). Editor.log persists across reloads. We read only the bytes
+			// APPENDED after install started (editorLogOffset) to avoid stale
+			// errors from previous compiles — see the comment above where the
+			// offset is captured. tail(N lines) does NOT work here because Unity
+			// writes a large block of RefreshProfiler lines AFTER compile, pushing
+			// the CS errors out of a small tail window.
+			let postStartedAt: string | null = null;
+			try {
+				await sleep(2000); // give Unity time to flush compile output to Editor.log
+				if (editorLogPath) {
+					const appended = readLogByPathFromOffset(editorLogPath, editorLogOffset);
+					if (appended.exists && appended.content) {
+						const seen = new Set<string>();
+						for (const line of appended.content.split("\n")) {
+							// Editor.log paths use double backslashes (Assets\\Editor\\...).
+							// Use a loose match: any line with Assets...error CSxxxx. Capture
+							// the file(line,col): error CSxxxx: description portion.
+							const m = line.match(/(Assets.*error CS\d{4}:.*)/);
+							if (m && !seen.has(m[1])) {
+								seen.add(m[1]);
+								compileErrors.push(m[1]);
+							}
+						}
+					}
+				}
+				// Verify the bridge actually restarted with the new code by comparing
+				// startedAt before vs after. If startedAt is unchanged (or absent on
+				// one side), the bridge is running STALE code — typically because the
+				// new PiBridge.cs failed to compile (the CS error check above should
+				// catch the cause). This is a stronger signal than "bridge online",
+				// which is true even when running the last-good build.
+				try {
+				const pingRes = await sendCommand<{ startedAt?: string }>(waited.bridge.port!, "ping", {}, 8000);
+				const sa = pingRes?.result?.startedAt;
+					if (typeof sa === "string") postStartedAt = sa;
+				} catch { /* non-fatal */ }
+			} catch {
+				// Editor.log read failed — non-fatal, bridge is still usable
+			}
+			const staleBridge =
+				preStartedAt !== null && postStartedAt !== null && preStartedAt === postStartedAt;
+			if (compileErrors.length > 0) {
+				nextSteps.push(
+					`⚠ ${compileErrors.length} compile error(s) detected! The new PiBridge.cs did NOT compile — bridge is running STALE code from the previous build.`,
+				);
+				for (const e of compileErrors.slice(0, 5)) nextSteps.push(`  ✗ ${e}`);
+				if (compileErrors.length > 5) nextSteps.push(`  ... and ${compileErrors.length - 5} more`);
+				nextSteps.push("Fix the errors and reinstall. Do NOT trust unity_command until compile succeeds — it's running old code.");
+			} else if (staleBridge) {
+				nextSteps.push(
+					`⚠ No compile errors in the new Editor.log output, but the bridge's startedAt timestamp did NOT change after install (was ${preStartedAt}, still ${postStartedAt}). This means the bridge is still running the PREVIOUS build — the recompile either didn't trigger or the new assembly failed to load. Focus Unity to force a recompile, then reinstall.`,
+				);
+			} else if (preStartedAt !== null && postStartedAt !== null) {
+				nextSteps.push(
+					`✓ Bridge restarted with new code (startedAt: ${preStartedAt} → ${postStartedAt}).`,
+				);
+			}
 		} else {
 			nextSteps.push(
 				`⚠ Bridge did not come back online within ${Math.round(bridgeWaitMs / 1000)}s. `
@@ -252,5 +403,7 @@ export async function runUnityInstallBridge(
 		nextSteps,
 		bridgeReady,
 		bridgeWaitMs,
+		compileErrors,
+		runtimeScriptsCopied,
 	};
 }

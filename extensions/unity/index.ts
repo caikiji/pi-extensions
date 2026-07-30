@@ -14,6 +14,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { runUnityAgent, unityAgentParams, type UnityAgentParams, type UnityAgentResult } from "./tools/unity-agent.ts";
 import { runUnityCommand, unityCommandParams, type UnityCommandResult } from "./tools/unity-command.ts";
 import { runUnityEvents, unityEventsParams, type UnityEventsResult } from "./tools/unity-events.ts";
 import { runUnityInstallBridge, unityInstallBridgeParams, type UnityInstallBridgeResult } from "./tools/unity-install-bridge.ts";
@@ -259,12 +260,62 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, _options, theme) {
 			const details = result.details as UnityInstallBridgeResult | undefined;
 			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
+			const hasErrors = details.compileErrors && details.compileErrors.length > 0;
+			const prefix = hasErrors ? theme.fg("error", `✗ installed (COMPILE ERRORS) `) : theme.fg("success", `✓ installed `);
 			return new Text(
-				theme.fg("success", `✓ installed `) + theme.fg("accent", `v${details.version}`) +
-					theme.fg("dim", ` → ${details.installedPath.replace(/\\/g, "/")}`),
+				prefix + theme.fg("accent", `v${details.version}`) +
+					theme.fg("dim", ` → ${details.installedPath.replace(/\\/g, "/")}`) +
+					(hasErrors ? theme.fg("error", ` ⚠ ${details.compileErrors!.length} errors`) : ""),
 				0,
 				0,
 			);
+		},
+	});
+
+	// ─── unity_agent ────────────────────────────────────────────────────────
+	// 视觉驱动的 Unity 测试。通过 MiniCPM-V “看见” Play Mode 画面并（未来）驱动多步
+	// 视觉-操作循环。observe 模式已实现，run_task 模式 v2 待输入模拟落地后启用。
+	pi.registerTool({
+		name: "unity_agent",
+		label: "Unity Agent",
+		description:
+			"视觉驱动的 Unity Play Mode 测试工具。通过本地 MiniCPM-V 视觉模型“看见”游戏画面。\n" +
+			"两种模式：\n" +
+			"- observe: 截取当前画面并分析，不做操作（已实现）\n" +
+			"- run_task: 在 Play Mode 中循环 截图→分析→操作 直到完成。视觉决策走 llama.cpp response_format json_schema（强制 JSON），输入注入走 eval 内联 Win32 keybd_event/mouse_event。超时返回 incomplete 可续跑。\n" +
+			"依赖：PiBridge 0.6.0+（eval）+ 本地 llama-server（llama.cpp）+ minicpm-v 模型。",
+		
+		promptSnippet: "让 MiniCPM-V 视觉模型分析 Unity 游戏画面（observe 模式）",
+		promptGuidelines: [
+			"Use unity_agent (mode=observe) to let a vision model (MiniCPM-V) see and analyze the current Unity Game View. Pass the analysis instruction in prompt.",
+			"unity_agent requires a local llama-server (llama.cpp) with a minicpm-v model loaded. If visionError reports the vision service unavailable, start llama-server (llama-server -m <model.gguf> --mmproj <mmproj.gguf> --port 18080) first.",
+			"observe mode captures via PiBridge eval (no new bridge command needed). The capture field reports isPlaying — if false, you are seeing the Editor scene view, not the running game. Enter Play Mode via unity_command play first for real gameplay.",
+			"run_task mode (requires Play Mode): loops capture→vision decision→input injection. Each step the model returns {action, params, status, reason} via llama.cpp response_format json_schema. Input injection uses Win32 keybd_event/mouse_event (old Input Manager + Windows). Returns incomplete on timeout/crash — resume with a new run_task call (Unity state persists). Check taskStatus field for success/stuck/incomplete/crashed.",
+			"run_task input actions: move_forward/backward (W/S, params duration_ms), turn_left/right (mouse, params duration_ms), click (params x,y 0~1), interact (E), jump (Space), wait (params duration_ms). The model decides one atomic action per step."
+		],
+		parameters: unityAgentParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await runUnityAgent(params as UnityAgentParams, ctx.cwd);
+			return {
+				content: [{ type: "text", text: formatUnityAgentResult(result) }],
+				details: result,
+			};
+		},
+
+		renderResult(result, _options, theme) {
+			const details = result.details as UnityAgentResult | undefined;
+			if (!details) return new Text(theme.fg("dim", "(no result)"), 0, 0);
+			if (details.error && !details.analysis) {
+				return new Text(theme.fg("error", `✗ ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms`), 0, 0);
+			}
+			const playing = details.capture?.isPlaying ? theme.fg("success", "▶ play") : theme.fg("dim", "○ edit");
+			if (details.mode === "run_task") {
+				const status = details.taskStatus ?? "?";
+				const statusColor = status === "success" ? "success" : status === "stuck" || status === "crashed" ? "error" : "warning";
+				return new Text(theme.fg("accent", `👁 run_task`) + theme.fg("dim", ` ${details.totalMs}ms `) + theme.fg(statusColor, `${status} (${details.stepsTaken ?? 0} steps)`), 0, 0);
+			}
+			return new Text(theme.fg("accent", `👁 ${details.mode}`) + theme.fg("dim", ` ${details.totalMs}ms `) + playing, 0, 0);
 		},
 	});
 
@@ -439,6 +490,12 @@ function formatInstallBridgeResult(result: UnityInstallBridgeResult): string {
 		lines.push(`  • ${f.replace(/\\/g, "/")}`);
 	}
 	lines.push("");
+	if (result.compileErrors && result.compileErrors.length > 0) {
+		lines.push(`⚠ ${result.compileErrors.length} COMPILE ERROR(S) — new PiBridge.cs did NOT compile, bridge is running STALE code:`);
+		for (const e of result.compileErrors.slice(0, 5)) lines.push(`  ✗ ${e}`);
+		if (result.compileErrors.length > 5) lines.push(`  ... and ${result.compileErrors.length - 5} more`);
+		lines.push("");
+	}
 	lines.push("Next steps:");
 	for (const step of result.nextSteps) {
 		lines.push(`  • ${step}`);
@@ -480,5 +537,77 @@ function formatUnityEventsResult(result: UnityEventsResult): string {
 			lines.push(`Error: ${result.response.error}`);
 		}
 	}
+	return lines.join("\n");
+}
+
+function formatUnityAgentResult(result: UnityAgentResult): string {
+	const lines: string[] = [];
+	lines.push(`Unity Agent — ${result.mode} (${result.totalMs}ms)`);
+	lines.push("");
+
+	if (!result.bridge.available) {
+		lines.push("⚠ PiBridge is not running.");
+		lines.push("");
+		lines.push("Install via unity_install_bridge and open the Unity project, then retry.");
+		if (result.error) {
+			lines.push("");
+			lines.push(`Reason: ${result.error}`);
+		}
+		return lines.join("\n");
+	}
+
+	lines.push(`Bridge: ${result.bridge.url} (v${result.bridge.version})`);
+	lines.push(`Vision: ${result.visionAvailable ? `✓ ${result.visionModel}` : "✗ unavailable"}`);
+	lines.push("");
+
+	if (result.error && !result.analysis) {
+		lines.push("✗ Failed");
+		lines.push("");
+		lines.push(`Error: ${result.error}`);
+		return lines.join("\n");
+	}
+
+	// run_task 模式：显示任务状态 + 步骤历史
+	if (result.mode === "run_task") {
+		lines.push(`Task status: ${result.taskStatus ?? "?"} (${result.stepsTaken ?? 0} steps)`);
+		if (result.steps && result.steps.length > 0) {
+			lines.push("");
+			lines.push("Steps:");
+			for (const s of result.steps) {
+				lines.push(`  ${s.step}. ${s.action} ${JSON.stringify(s.params)} — ${s.reason} (${s.durationMs}ms)`);
+			}
+		}
+		if (result.analysis) {
+			lines.push("");
+			lines.push("Summary:");
+			lines.push(result.analysis);
+		}
+		if (result.error && result.taskStatus !== "success") {
+			lines.push("");
+			lines.push(`⚠ ${result.error}`);
+		}
+		return lines.join("\n");
+	}
+
+	if (result.capture) {
+		lines.push(
+			`Capture: ${result.capture.width}×${result.capture.height}, ${result.capture.captureMs}ms, ` +
+				(result.capture.isPlaying ? "▶ Play Mode" : "○ Edit Mode (not in Play Mode — seeing scene view, not gameplay)"),
+		);
+	}
+
+	if (result.analysis) {
+		lines.push("");
+		lines.push("Analysis:");
+		lines.push("─".repeat(60));
+		lines.push(result.analysis);
+		lines.push("─".repeat(60));
+	}
+
+	if (result.error) {
+		lines.push("");
+		lines.push(`⚠ ${result.error}`);
+	}
+
 	return lines.join("\n");
 }

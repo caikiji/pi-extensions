@@ -57,6 +57,12 @@ namespace PiBridge
         // if you don't want the window stealing focus.
         private static bool AutoFocusEnabled = true;
 
+        // Wall-clock timestamp (UTC ticks) when this bridge instance started.
+        // Set in Start(). Domain reload recreates statics, so this changes on
+        // every reload — letting install verify the bridge actually restarted
+        // (i.e. the new PiBridge.cs compiled and loaded), not just that a port
+        // is still reachable. Exposed via ping.
+        private static long StartedAtTicks;
         private static HttpListener _listener;
         private static Thread _thread;
         private static int _port;
@@ -75,6 +81,7 @@ namespace PiBridge
             {
                 if (_listener != null) return; // already running
 
+                StartedAtTicks = DateTime.UtcNow.Ticks;
                 _port = FindFreePort();
                 if (_port < 0)
                 {
@@ -312,6 +319,7 @@ namespace PiBridge
                             applicationPath = EditorApplication.applicationPath,
                             autoFocus = AutoFocusEnabled,
                             isApplicationActive = appActive,
+                            startedAt = StartedAtTicks.ToString(),
                         }
                     };
                 }
@@ -735,6 +743,10 @@ namespace PiBridge
         private static void RegisterShutdown()
         {
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
+            // 注意：不要在这里挂 playModeStateChanged 去释放鼠标/设 InputLock——
+            // 用户手动点 Play 时游戏输入必须完全不受影响（和没装 bridge 一样）。
+            // 鼠标/InputLock 的处理全部收在 AgentInput.TakeOver/Release 里，
+            // 只在 agent 接管期间生效。
         }
 
         private static void Stop()
