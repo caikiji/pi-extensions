@@ -28,6 +28,8 @@ import {
 	checkVisionService,
 	decideAction,
 	summarizeTask,
+	AGENT_FPS,
+	AGENT_MAX_FRAMES_PER_STEP,
 	type ActionHistory,
 	type AgentAction,
 	type CaptureResult,
@@ -218,6 +220,61 @@ async function runObserve(
 //   - 每步含历史上下文，让模型知道之前做了什么。
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 动作注入后的帧采样：在 [0, duration_ms] 区间按 AGENT_FPS 采多帧。
+ *
+ * 让游戏跑帧并截图，记录动作过程（位移/旋转），让模型下一步看到动作效果。
+ * llama.cpp 多图保序 + prompt cache 命中稳定前缀，全量累积比滑动窗口更快。
+ *
+ * 采样策略：
+ *   - interval = 1000 / AGENT_FPS（默认 4fps → 250ms 一帧）
+ *   - 理论帧数 = floor(duration_ms / interval) + 1（含 t=0 起点）
+ *   - 超过 AGENT_MAX_FRAMES_PER_STEP 则等间隔降采样到上限
+ *   - 最后一帧采在 duration_ms 附近（动作结束时刻）
+ *
+ * @param port PiBridge 端口
+ * @param durationMs 动作持续时长（ms）
+ * @returns 采样到的帧 base64 数组 + 采样耗时
+ */
+async function sampleFramesDuringAction(
+	port: number,
+	durationMs: number,
+): Promise<{ frames: string[]; sampleMs: number }> {
+	const t0 = Date.now();
+	const interval = 1000 / Math.max(1, AGENT_FPS);
+	// 采样时刻点（ms）：0, interval, 2*interval, ... ≤ durationMs
+	const rawPoints: number[] = [];
+	for (let t = 0; t <= durationMs; t += interval) rawPoints.push(t);
+	// 确保最后一个点接近 durationMs（动作结束时刻）
+	if (rawPoints[rawPoints.length - 1] < durationMs - interval / 2) {
+		rawPoints.push(durationMs);
+	}
+	// 超过上限则等间隔降采样
+	let points = rawPoints;
+	if (rawPoints.length > AGENT_MAX_FRAMES_PER_STEP) {
+		points = [];
+		const step = (rawPoints.length - 1) / (AGENT_MAX_FRAMES_PER_STEP - 1);
+		for (let i = 0; i < AGENT_MAX_FRAMES_PER_STEP; i++) {
+			points.push(rawPoints[Math.round(i * step)]);
+		}
+	}
+
+	const frames: string[] = [];
+	let lastT = 0;
+	for (const t of points) {
+		const wait = t - lastT;
+		if (wait > 0) await sleep(wait);
+		lastT = t;
+		try {
+			const cap = await captureScreen(port);
+			frames.push(cap.base64);
+		} catch {
+			// 单帧采集失败不中断（可能 bridge 临时不可用），跳过这帧
+		}
+	}
+	return { frames, sampleMs: Date.now() - t0 };
+}
+
 async function runTask(
 	projectPath: string,
 	bridge: BridgeInfo,
@@ -254,7 +311,7 @@ async function runTask(
 		} catch {
 			// 总结失败不阻塞返回，用步骤流水账作为 fallback
 		}
-		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, status, error, finalSummary, totalStart);
+		return makeTaskResult(projectPath, bridge, model, prompt, stepRecords, status, error, totalStart, finalSummary);
 	}
 
 	try {
@@ -355,17 +412,9 @@ async function runTask(
 				return await summarizeAndReturn("stuck", act.reason);
 			}
 
-			// 3. 执行 action。执行前先查当前按住的键，传给 actionToAgentInputSteps
-			//    做分级兜底（release-all + 重复 press 检测）。纠正信息已拼进 step.label，
-			//    下面写入 history 让模型下一步看到并修正（闭环）。
-			let prePressedKeys: string[] = [];
-			try {
-				const pre = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
-				if (pre.ok && typeof pre.result?.value === "string" && pre.result.value !== "(无)") {
-					prePressedKeys = pre.result.value.split(",").map((s) => s.trim()).filter(Boolean);
-				}
-			} catch { /* best-effort */ }
-			const steps = actionToAgentInputSteps(act, prePressedKeys);
+			// 3. 执行 action。duration_ms 范式：动作由 AgentInput 内部计时器驱动，
+			//    注入后按 FPS 在 [0, duration_ms] 采样多帧，让模型下一步看到动作过程。
+			const steps = actionToAgentInputSteps(act);
 			for (const s of steps) {
 				try {
 					const resp = await sendCommand(port, "eval", { code: s.code }, 30000);
@@ -381,14 +430,14 @@ async function runTask(
 				}
 			}
 
-			// 执行后再查按住的键写入历史，让模型知道现在哪些键还按着（避免重复 press）。
-			// 用执行后的真实状态（含 release-all 兜底效果），而非推算。step.label 已含纠正信息。
-			let postPressedKeys = "(未知)";
-			try {
-				const post = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
-				if (post.ok && typeof post.result?.value === "string") postPressedKeys = post.result.value;
-			} catch { /* best-effort */ }
-			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 当前按住: ${postPressedKeys}` });
+			// 4. 帧采样：动作注入后在 [0, duration_ms] 区间按 FPS 采多帧，让游戏跑帧
+			//    并记录动作过程。全量累积到 frameHistory（配合每步硬上限防膨胀），
+			//    下一步 decideAction 拼 [...frameHistory, currentFrame]，llama.cpp prompt
+			//    cache 命中稳定前缀。
+			const dur = act.params.duration_ms ?? 800;
+			const sampled = await sampleFramesDuringAction(port, dur);
+			frameHistory.push(...sampled.frames);
+			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 采帧${sampled.frames.length}张` });
 		}
 
 		// 跑完 maxSteps 还没 success/stuck
@@ -416,8 +465,8 @@ function makeTaskResult(
 	steps: TaskStepRecord[],
 	status: "ongoing" | "incomplete" | "success" | "stuck" | "crashed",
 	error: string,
-	finalSummary?: string,
 	totalStart: number,
+	finalSummary?: string,
 ): UnityAgentResult {
 	const summary = steps.length > 0
 		? steps.map((s) => `  ${s.step}. ${s.action} ${JSON.stringify(s.params)} — ${s.reason}`).join("\n")
