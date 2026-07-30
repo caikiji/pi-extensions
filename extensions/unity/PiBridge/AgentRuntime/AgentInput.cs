@@ -80,8 +80,11 @@ namespace PiBridge
                     if (_instance == null)
                     {
                         var go = new GameObject("__AgentInput__");
+                        // HideAndDontSave：不进 Hierarchy、不随场景/Play 会话持久化，
+                        // 域卸载时自动清理。普通 DontDestroyOnLoad 会把无组件的 GameObject
+                        // 壳残留到后续 Play 会话（实测累积出多个 __AgentInput__ 残壳）。
+                        go.hideFlags = HideFlags.HideAndDontSave;
                         _instance = go.AddComponent<AgentInput>();
-                        if (Application.isPlaying) DontDestroyOnLoad(go);
                     }
                 }
                 return _instance;
@@ -110,13 +113,17 @@ namespace PiBridge
         private static double s_keyShiftTime, s_keyTurnLeftTime, s_keyTurnRightTime;
 
         // ─── 持续动作计时器（替代协程）────────────────────────────────
+        // duration_ms 范式：Move/Turn 设目标值 + 结束时刻，LateUpdate 计时器有效期间
+        // 每帧维持目标值，超时清零。与 press/release 按键事件模型并存（后者优先级低）。
         private static double s_moveEndTime = -1;   // EditorApplication.timeSinceStartup
+        private static Vector2 s_moveTarget = Vector2.zero;  // Move 目标方向，计时器维持
         private static double s_turnEndTime = -1;
         private static float s_turnPerFrameYaw;
         private static float s_turnPerFramePitch;
 
         // ─── 探测到的游戏结构（static，Describe/TakeOver/LateUpdate 共享）─
         private static bool s_probed;
+        private static bool s_staleProbe;                    // Play 切换后置位，下次 ProbeStatic 强制重探
         private static MonoBehaviour s_playerController;       // 游戏的 PlayerController
         private static Type s_playerControllerType;
         private static FieldInfo s_moveInputField;
@@ -139,7 +146,7 @@ namespace PiBridge
         private static Type s_inputLockType;
         private static PropertyInfo s_inputLockUiOpenProp;
         private static bool s_playerWasEnabled;                // TakeOver 前的 enabled，Release 恢复
-
+        private static bool s_uiOpenWas;                       // TakeOver 前的 InputLock.UiOpen，Release 恢复
         // ─── 自管重力（游戏 Update 被禁用，重力得 AgentInput 管）────────
         private static float s_verticalVelocity;
 
@@ -200,10 +207,14 @@ namespace PiBridge
         /// </param>
         public static string TakeOver(bool allowPlayerControl = false)
         {
-            ProbeStatic();
+            // 注意顺序：必须先拿单例再探测。首次创建单例时 AddComponent 触发 OnEnable
+            // → ResetProbe()，会把刚探测到的引用清掉（real-world 首调 TakeOver 失效的根因）。
             var inst = Instance;
+            ProbeStatic();
             s_takeover = true;
             s_allowPlayerControl = allowPlayerControl;
+            // 记录原 UiOpen（两种模式都记）：完全接管会强制设 true，Release 据此恢复。
+            s_uiOpenWas = GetInputLockUiOpen();
             if (!allowPlayerControl)
             {
                 // 完全接管：禁用游戏 PlayerController（它的 Update 每帧用 Input 覆盖
@@ -220,6 +231,7 @@ namespace PiBridge
                 Cursor.lockState = CursorLockMode.None;
                 Cursor.visible = true;
                 // 同时尝试设 InputLock.UiOpen=true（双保险：让游戏自己的输入逻辑也停）。
+                // 原值已在上面记录，Release 时恢复——否则玩家依然无法操控。
                 TrySetInputLockUiOpen(true);
                 // 记录当前相机 pitch 作为固定纵向角度（接管期间不变），
                 // yaw 改为跟随角色朝向（水平跟随），这样 WASD 就能完整操控。
@@ -240,6 +252,7 @@ namespace PiBridge
             s_takeover = false;
             s_allowPlayerControl = false;
             s_virtualMove = Vector2.zero;
+            s_moveTarget = Vector2.zero;
             s_virtualSprint = false;
             s_virtualYawDelta = 0;
             s_virtualPitchDelta = 0;
@@ -253,16 +266,24 @@ namespace PiBridge
             {
                 try { s_playerController.enabled = s_playerWasEnabled; } catch { }
             }
+            // 恢复 InputLock.UiOpen 到 TakeOver 前的值（两种接管模式都恢复；共享模式
+            // 下 TakeOver 没改过它，恢复为原值等于无操作）。完全接管强制设过 true，不恢复
+            // 的话游戏输入逻辑（PlayerController/FollowCamera 查 UiOpen）会一直停在 UI 态。
+            // SetUiOpen(false) 会连带恢复 Cursor.lockState=Locked（游戏默认游玩状态）。
+            TrySetInputLockUiOpen(s_uiOpenWas);
             return "released input";
         }
 
         // ─── 高层动作 API（agent 通过 eval 调用）────────────────────────
 
         /// <summary>持续移动。x/z 是 -1~1，duration_ms 后停止。</summary>
+        /// Move 设 s_moveTarget/s_moveEndTime，LateUpdate 在计时器有效期间每帧
+        /// 维持 s_virtualMove=s_moveTarget（防被按键合成段覆盖）；超时清零。
         public static string Move(float x, float z, int durationMs)
         {
             ProbeStatic();
-            s_virtualMove = new Vector2(x, z);
+            s_moveTarget = new Vector2(x, z);
+            s_virtualMove = s_moveTarget;
             s_moveEndTime = Time.realtimeSinceStartup + durationMs / 1000.0;
             return "move x=" + x + " z=" + z + " " + durationMs + "ms";
         }
@@ -402,47 +423,71 @@ namespace PiBridge
             // 按键超时兑底（防模型忘松手）
             CheckKeyHoldTimeout();
 
-            // ── 从按键状态合成虚拟输入（按键事件模型）──
-            // W/S=前后（z），A/D=左右（x），Shift=冲刺，TurnLeft/TurnRight=转向
-            float mx = 0f, mz = 0f;
-            if (s_keyD) mx += 1f;
-            if (s_keyA) mx -= 1f;
-            if (s_keyW) mz += 1f;
-            if (s_keyS) mz -= 1f;
-            s_virtualMove = new Vector2(mx, mz);
-            s_virtualSprint = s_keyShift;
-            // 转向速度：每秒约 90 度（可调），按住持续转
-            float turnRate = 90f * Time.deltaTime;
-            s_virtualYawDelta = 0f;
-            if (s_keyTurnLeft) s_virtualYawDelta -= turnRate;
-            if (s_keyTurnRight) s_virtualYawDelta += turnRate;
-            s_virtualPitchDelta = 0f;
+            // ── 合成虚拟输入：duration_ms 计时器优先，press/release 按键合成兑底 ──
+            // 2026-07-31 重构：新范式用 Move/Turn duration_ms API，press/release 仅作兼容。
+            // 计时器有效期间每帧维持目标值；超时则交由按键合成（无按键=zero）。
+            double now = Time.realtimeSinceStartup;
 
-            // 旧 duration 计时器兑底（向后兼容 Move/Turn API，新代码用 PressKey）
-            if (s_moveEndTime > 0 && Time.realtimeSinceStartup >= s_moveEndTime)
+            // 移动：duration 计时器优先
+            if (s_moveEndTime > 0)
             {
-                // 不覆盖按键合成的输入：只在无按键按下时才清零
-                if (!s_keyW && !s_keyA && !s_keyS && !s_keyD) s_virtualMove = Vector2.zero;
-                s_moveEndTime = -1;
-            }
-            // 旧 turn 计时器兑底（向后兼容 Turn API）
-            if (s_turnEndTime > 0 && !s_keyTurnLeft && !s_keyTurnRight)
-            {
-                if (Time.realtimeSinceStartup < s_turnEndTime)
+                if (now < s_moveEndTime)
                 {
-                    s_virtualYawDelta = s_turnPerFrameYaw;
-                    s_virtualPitchDelta = s_turnPerFramePitch;
+                    s_virtualMove = s_moveTarget;  // 维持 Move 设的方向
                 }
                 else
                 {
-                    s_virtualYawDelta = 0;
-                    s_virtualPitchDelta = 0;
-                    s_turnEndTime = -1;
+                    s_virtualMove = Vector2.zero;
+                    s_moveEndTime = -1;
                 }
             }
+            else
+            {
+                // press/release 兑底（无 duration 计时器时）：W/S=前后(z)，A/D=左右(x)
+                float mx = 0f, mz = 0f;
+                if (s_keyD) mx += 1f;
+                if (s_keyA) mx -= 1f;
+                if (s_keyW) mz += 1f;
+                if (s_keyS) mz -= 1f;
+                s_virtualMove = new Vector2(mx, mz);
+            }
+            s_virtualSprint = s_keyShift;
 
             if (!s_takeover) return;
             if (!Application.isPlaying) return;
+
+            // ── 转向（有游戏副作用，必须在 takeover 判定之后）──
+            // duration 计时器优先。turn 语义 = 角色转身（相机跟随角色）。
+            // 2026-07-31 v2：turn 改角色朝向而非相机 yaw，消除“相机朝向≠角色朝向”的方向错乱。
+            // 模型看到的画面方向 = 角色朝向 = move_forward 方向，零错乱。
+            // turn 计时器有效期间每帧给角色 yaw 加 s_turnPerFrameYaw；超时则停。
+            s_virtualYawDelta = 0f;
+            s_virtualPitchDelta = 0f;
+            if (s_turnEndTime > 0)
+            {
+                if (now < s_turnEndTime && s_playerController != null)
+                {
+                    // 直接转角色朝向（不用 SmoothDampAngle——turn 要即时响应，平滑靠 duration 分摊）
+                    float cur = s_playerController.transform.eulerAngles.y;
+                    s_playerController.transform.rotation = Quaternion.Euler(0f, cur + s_turnPerFrameYaw, 0f);
+                }
+                else
+                {
+                    s_turnEndTime = -1;
+                }
+            }
+            else
+            {
+                // press/release 兑底：TurnLeft/TurnRight 按住时转角色（与 duration 范式一致）
+                float turnRate = 90f * Time.deltaTime;
+                if (s_playerController != null && (s_keyTurnLeft || s_keyTurnRight))
+                {
+                    float cur = s_playerController.transform.eulerAngles.y;
+                    if (s_keyTurnLeft) cur -= turnRate;
+                    if (s_keyTurnRight) cur += turnRate;
+                    s_playerController.transform.rotation = Quaternion.Euler(0f, cur, 0f);
+                }
+            }
 
             // 完全接管模式：每帧维持鼠标释放 + InputLock.UiOpen=true。
             // 游戏可能在某处重新 Cursor.lockState=Locked 抢走 OS 焦点，接管期间持续覆盖。
@@ -460,30 +505,21 @@ namespace PiBridge
 
             float dt = Time.deltaTime;
 
-            // 计算移动方向：虚拟输入 + 相机朝向（和 PlayerController.ComputeMoveDirection 一致）
+            // 计算移动方向：虚拟输入相对角色朝向（W=角色前方）。
+            // 2026-07-31 v2：turn 改角色朝向后，move 按角色朝向走——画面方向=角色朝向=move 方向，零错乱。
             // moveInput: x=Horizontal(左右), z=Vertical(前后, 1=前)
             Vector3 moveDir = Vector3.zero;
             bool hasInput = s_virtualMove.sqrMagnitude > 0.01f;
             if (hasInput)
             {
                 // 移动方向相对角色当前朝向（W=角色前方，S=后方，A=左，D=右）。
-                // 不用相机 yaw——相机跟随角色朝向，用相机 yaw 会形成循环依赖
-                // （相机追角色→角色追相机）导致快速旋转。
+                // turn 已转角色朝向，move 直接按角色朝向走，无需再 SmoothDampAngle 转身。
                 float charYaw = s_playerController != null
                     ? s_playerController.transform.eulerAngles.y
                     : 0f;
                 float targetAngle = Mathf.Atan2(s_virtualMove.x, s_virtualMove.y) * Mathf.Rad2Deg + charYaw;
                 moveDir = Quaternion.Euler(0f, targetAngle, 0f) * Vector3.forward;
                 moveDir = moveDir.normalized;
-
-                // 转向角色面向移动方向（SmoothDampAngle，用探测到的 turnSmoothTime，和游戏一致）
-                if (s_playerController != null)
-                {
-                    float smoothYaw = Mathf.SmoothDampAngle(
-                        s_playerController.transform.eulerAngles.y, targetAngle,
-                        ref s_turnSmoothVelocity, s_turnSmoothTime);
-                    s_playerController.transform.rotation = Quaternion.Euler(0f, smoothYaw, 0f);
-                }
             }
             bool isSprinting = s_virtualSprint && hasInput;
             float speed = isSprinting ? s_runSpeed : s_walkSpeed;
@@ -515,17 +551,15 @@ namespace PiBridge
                 try { if (s_isGroundedProp != null) s_isGroundedProp.SetValue(s_playerController, s_charController.isGrounded); } catch { }
             }
 
-            // 相机水平跟随角色：yaw 平滑跟随角色朝向，pitch 固定（接管时记录的值）。
-            // 这样 agent 只用 WASD 操控角色，相机自动跟在身后，无需拖动视角。
-            // TurnLeft/TurnRight 不再直接改相机（s_virtualYawDelta 不用），角色转向靠移动方向驱动。
+            // 相机跟随角色：yaw = 角色朝向，pitch 固定（接管时记录的值）。
+            // 2026-07-31 v2：turn 转角色朝向，相机硬跟角色——画面方向=角色朝向，
+            // 模型看到的“前方”就是 move_forward 的方向，消除方向错乱。
             if (s_followCamera != null && s_yawField != null && s_playerController != null)
             {
                 try
                 {
-                    float targetYaw = s_playerController.transform.eulerAngles.y;
-                    // 直接设 yaw=角色朝向（不用 SmoothDampAngle——它速度变量可能失控导致 yaw 累加到 1.8万）。
-                    // 相机硬跟角色朝向，简单可靠。
-                    s_yawField.SetValue(s_followCamera, targetYaw);
+                    // 直接设 yaw=角色朝向（不用 SmoothDampAngle——速度变量可能失控致 yaw 累加到 1.8万）。
+                    s_yawField.SetValue(s_followCamera, s_playerController.transform.eulerAngles.y);
                 } catch { }
             }
             if (s_followCamera != null && s_pitchField != null)
@@ -541,11 +575,24 @@ namespace PiBridge
 
         // ─── 反射探测游戏结构（静态）────────────────────────────────────
         // 扫描场景，按命名约定找 PlayerController/CharacterController/相机/InputLock。
-        // 用 static 字段存结果。Play Mode 进入时实例会重新探测（见 OnEnable）。
+        // 用 static 字段存结果。Play 切换后 s_staleProbe 置位，下次调用强制重探。
         private static void ProbeStatic()
         {
-            if (s_probed) return;
+            if (s_probed && !s_staleProbe) return;
+            // 重探前先清掉可能已失效的旧引用（Play 切换后场景对象已销毁）
+            s_playerController = null;
+            s_playerControllerType = null;
+            s_followCamera = null;
+            s_charController = null;
+            s_moveInputField = null;
+            s_sprintField = null;
+            s_yawField = null;
+            s_pitchField = null;
+            s_planarSpeedProp = null;
+            s_isSprintingProp = null;
+            s_isGroundedProp = null;
             s_probed = true;
+            s_staleProbe = false;
 
             // 找 PlayerController：按类型名匹配（兼容不同命名空间）
             MonoBehaviour[] allMono;
@@ -684,6 +731,19 @@ namespace PiBridge
             return defaultVal;
         }
 
+        /// <summary>反射读 InputLock.UiOpen 当前值（探测不到时返回 false）。</summary>
+        private static bool GetInputLockUiOpen()
+        {
+            if (s_inputLockType == null) return false;
+            try
+            {
+                if (s_inputLockUiOpenProp != null && s_inputLockUiOpenProp.CanRead)
+                    return (bool)s_inputLockUiOpenProp.GetValue(null);
+            }
+            catch { /* best-effort */ }
+            return false;
+        }
+
         /// <summary>
         /// 反射设 InputLock.UiOpen=true（若探测到该静态类）。
         /// 双保险：让游戏自己的输入逻辑走 UI 分支（不读 Input、不锁鼠标）。
@@ -706,8 +766,9 @@ namespace PiBridge
 
         /// <summary>
         /// 释放鼠标：探测 InputLock 并设 UiOpen=true（会一并解锁 Cursor），
-        /// 同时直接 Cursor.lockState=None 双保险。Play Mode 进入时立即调用，
-        /// 避免游戏默认捕获鼠标抢走 OS 焦点。幂等。
+        /// 同时直接 Cursor.lockState=None 双保险。幂等。
+        /// 注意：只应在 agent 接管（TakeOver）期间调用——它会停掉游戏的输入逻辑，
+        /// 绝不能挂在 Play Mode 进入钩子上（那会破坏用户手动 Play 的操控）。
         /// </summary>
         public static void ReleaseMouse()
         {
@@ -760,39 +821,32 @@ namespace PiBridge
             return "decision prompt saved to " + PromptFilePath + " (" + (s_decisionPrompt?.Length ?? 0) + " chars)";
         }
 
-        // Play Mode 进入时场景对象重建，重新探测。
-        // 双保险：单例 OnEnable 时重置 + EditorApplication.playModeStateChanged
-        // 钩子在 EnteredPlayMode 时重置。OnEnable 可能比场景对象初始化早（Play
-        // Mode 首帧场景未就绪），playModeStateChanged 钧子更可靠地标记“需要重探”。
+        // Play Mode 进入时场景对象重建，探测缓存由下次 ProbeStatic 经 s_staleProbe 重建。
+        // 这里不碰鼠标/InputLock——用户手动点 Play 时游戏必须保持原样（UiOpen=false、
+        // 鼠标由游戏自己管），任何自动释放都会破坏操控。
         private void OnEnable()
         {
             ResetProbe();
-#if UNITY_EDITOR
-            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
-            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
-#endif
         }
 
-#if UNITY_EDITOR
-        private static void OnPlayModeStateChanged(PlayModeStateChange state)
-        {
-            // EnteredPlayMode：场景刚重建，之前探测的对象已失效，标记需重探。
-            // 下次 ProbeStatic()/TakeOver() 会重新扫场景。
-            if (state == PlayModeStateChange.EnteredPlayMode)
-            {
-                ResetProbe();
-                // Play Mode 一进入就释放鼠标：游戏默认 InputLock.UiOpen=false 会
-                // Cursor.lockState=Locked 捕获鼠标，抢走 OS 焦点。agent 开发期间
-                // 不需要玩家操控，立即释放让用户能正常用鼠标。
-                ReleaseMouse();
-            }
-        }
-#endif
-
-        // 重置所有探测结果。TakeOver/Describe 会重新探测。
+        // 重置探测结果并标记重探（Play 切换后场景对象已失效）。同时清 takeover/虚拟输入/
+        // 计时器/按键状态——Play 会话结束或单例重建后不该残留任何接管痕迹。
         private static void ResetProbe()
         {
             s_probed = false;
+            s_staleProbe = true;
+            s_takeover = false;
+            s_allowPlayerControl = false;
+            s_virtualMove = Vector2.zero;
+            s_moveTarget = Vector2.zero;
+            s_virtualSprint = false;
+            s_virtualYawDelta = 0f;
+            s_virtualPitchDelta = 0f;
+            s_moveEndTime = -1;
+            s_turnEndTime = -1;
+            s_keyW = s_keyA = s_keyS = s_keyD = false;
+            s_keyShift = false;
+            s_keyTurnLeft = s_keyTurnRight = false;
             s_playerController = null;
             s_playerControllerType = null;
             s_followCamera = null;

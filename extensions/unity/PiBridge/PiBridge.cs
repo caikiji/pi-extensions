@@ -743,16 +743,10 @@ namespace PiBridge
         private static void RegisterShutdown()
         {
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
-            // Play Mode 进入时释放鼠标：游戏默认捕获鼠标（Cursor.lockState=Locked），
-            // 抢走 OS 焦点阻碍 agent 开发。EnteredPlayMode 时调 AgentInput.ReleaseMouse
-            // 立即解锁，让用户能正常用鼠标（不依赖运行时单例 OnEnable 的时机）。
-            EditorApplication.playModeStateChanged += state =>
-            {
-                if (state == PlayModeStateChange.EnteredPlayMode)
-                {
-                    try { PiBridge.AgentInput.ReleaseMouse(); } catch { /* best-effort */ }
-                }
-            };
+            // 注意：不要在这里挂 playModeStateChanged 去释放鼠标/设 InputLock——
+            // 用户手动点 Play 时游戏输入必须完全不受影响（和没装 bridge 一样）。
+            // 鼠标/InputLock 的处理全部收在 AgentInput.TakeOver/Release 里，
+            // 只在 agent 接管期间生效。
         }
 
         private static void Stop()
