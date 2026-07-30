@@ -28,6 +28,7 @@ import {
 	checkVisionService,
 	decideAction,
 	summarizeTask,
+	type ActionHistory,
 	type AgentAction,
 	type CaptureResult,
 } from "../lib/vision-client.ts";
@@ -354,8 +355,17 @@ async function runTask(
 				return await summarizeAndReturn("stuck", act.reason);
 			}
 
-			// 3. 执行 action（AgentInput 版：一次 eval 调用 Move/Turn/Jump/Interact）
-			const steps = actionToAgentInputSteps(act);
+			// 3. 执行 action。执行前先查当前按住的键，传给 actionToAgentInputSteps
+			//    做分级兜底（release-all + 重复 press 检测）。纠正信息已拼进 step.label，
+			//    下面写入 history 让模型下一步看到并修正（闭环）。
+			let prePressedKeys: string[] = [];
+			try {
+				const pre = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
+				if (pre.ok && typeof pre.result?.value === "string" && pre.result.value !== "(无)") {
+					prePressedKeys = pre.result.value.split(",").map((s) => s.trim()).filter(Boolean);
+				}
+			} catch { /* best-effort */ }
+			const steps = actionToAgentInputSteps(act, prePressedKeys);
 			for (const s of steps) {
 				try {
 					const resp = await sendCommand(port, "eval", { code: s.code }, 30000);
@@ -371,13 +381,14 @@ async function runTask(
 				}
 			}
 
-			// 查询当前按下的键，写入历史让模型知道哪些键还按着（避免重复 press）
-			let pressedKeys = "(未知)";
+			// 执行后再查按住的键写入历史，让模型知道现在哪些键还按着（避免重复 press）。
+			// 用执行后的真实状态（含 release-all 兜底效果），而非推算。step.label 已含纠正信息。
+			let postPressedKeys = "(未知)";
 			try {
-				const pk = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
-				if (pk.ok && typeof pk.result?.value === "string") pressedKeys = pk.result.value;
+				const post = await sendCommand<{ value?: string }>(port, "eval", { code: "PiBridge.AgentInput.GetPressedKeys()" }, 5000);
+				if (post.ok && typeof post.result?.value === "string") postPressedKeys = post.result.value;
 			} catch { /* best-effort */ }
-			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 当前按住: ${pressedKeys}` });
+			history.push({ action: act.action, result: `${steps.map((s) => s.label).join(",")} | 当前按住: ${postPressedKeys}` });
 		}
 
 		// 跑完 maxSteps 还没 success/stuck

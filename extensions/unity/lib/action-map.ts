@@ -177,25 +177,78 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
  *     public 方法或 profile 才能真正触发——这里仍调用，预留 profile 扩展。
  *   - click 仍回退到 Win32（AgentInput 不处理 UI 点击；若项目无 UI 点击需求可忽略）。
  *
- * @param action 模型决定的动作
+ * 分级兜底（schema 现强制 key 必填，非 key 动作填 "None"）：
+ *   - wait 误带真 key → press（保留意图）
+ *   - press/release 漏 key（None/缺失）→ 先从 reason 文本推断 key；
+ *     release 仍无 key 且有键按住 → release 最近按下的（"停掉一切"语义）；
+ *     press 仍无 key 且无法推断 → wait（最后手段）
+ *   - 重复 press 已按住的键 → 跳过注入（PressKey 重设 true 无害但浪费步）
+ * 所有纠正都拼进 step.label，run_task 写回 history 让模型下一步看到并修正（闭环）。
+ *
+ * @param action 模型决定的动作（schema 强制 key 必填）
+ * @param pressedKeys 当前已按住的键（来自 GetPressedKeys，用于 release-all + 重复 press 检测）
  * @returns eval 步骤数组，每步是 { code, label, waitMs }
  */
-export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
+const VALID_KEYS = ["W", "A", "S", "D", "Shift", "TurnLeft", "TurnRight"];
+
+/**
+ * 从模型 reason 文本里捞 key 名。模型常在 reason 里写 "release W" 却漏 params.key，
+ * 这里捞出来兜底用。长串先匹配（TurnLeft/TurnRight/Shift 先于单字母，避免误匹配）。
+ */
+function inferKeyFromReason(reason: string): string | undefined {
+	if (!reason) return undefined;
+	const ordered = ["TurnLeft", "TurnRight", "Shift", "W", "A", "S", "D"];
+	for (const k of ordered) if (reason.includes(k)) return k;
+	return undefined;
+}
+
+export function actionToAgentInputSteps(action: AgentAction, pressedKeys: string[] = []): ActionStep[] {
 	const steps: ActionStep[] = [];
-	let key = action.params.key;
+	let key: string = action.params.key;  // string 而非联合类型，便于从 reason/pressedKeys 推断赋值
+	// "None" 或缺失 → 视为漏 key（schema 现强制填值，缺失理论上不会发生）
+	const hasKey = !!key && key !== "None";
 
-	// 纠错：模型常把 wait 误带 key（想 press 却选了 wait），转成 press；
-	// press/release 漏 key 则转 wait（无法执行按键动作）。
 	let effectiveAction = action.action;
-	if (effectiveAction === "wait" && key) effectiveAction = "press";
-	if ((effectiveAction === "press" || effectiveAction === "release") && !key) effectiveAction = "wait";
+	let note = ""; // 纠正信息，拼进 step.label，run_task 写回 history 让模型下一步看到
 
+	// 兜底 1：wait 误带真 key（模型想 press 却选了 wait）→ 转 press，保留意图
+	if (effectiveAction === "wait" && hasKey) {
+		effectiveAction = "press";
+		note = "纠正：wait带key，按press执行";
+	}
+
+	// 兜底 2：press/release 漏 key（key 为 None/缺失）
+	if ((effectiveAction === "press" || effectiveAction === "release") && !hasKey) {
+		// 2a：从 reason 推断（模型常在 reason 写 "release W"）
+		const inferred = inferKeyFromReason(action.reason);
+		if (inferred) {
+			key = inferred;
+			note = `纠正：漏key，从reason推断为${inferred}`;
+		} else if (effectiveAction === "release" && pressedKeys.length > 0) {
+			// 2b：release 无 key 且有键按住 → release 最后按下的（"停掉一切"语义）
+			key = pressedKeys[pressedKeys.length - 1];
+			note = `纠正：release漏key，释放最近按键${key}`;
+		} else {
+			// 2c：press 无 key 且无法推断 → wait（最后手段，反馈给模型）
+			effectiveAction = "wait";
+			note = "纠正：press漏key且无法推断，转wait";
+		}
+	}
+
+	// 重复 press 检测：press 一个已按住的键 → 跳过注入（角色本就在做该动作）
+	const willPressHeld = effectiveAction === "press" && !!key && key !== "None" && pressedKeys.includes(key);
+
+	const labelSuffix = note ? ` (${note})` : "";
 	switch (effectiveAction) {
 		case "press":
-			steps.push({ code: `PiBridge.AgentInput.PressKey("${key}")`, label: `press ${key}`, waitMs: 0 });
+			if (willPressHeld) {
+				steps.push({ code: `"already pressed ${key}"`, label: `press ${key} (跳过：已按住)`, waitMs: 0 });
+			} else {
+				steps.push({ code: `PiBridge.AgentInput.PressKey("${key}")`, label: `press ${key}${labelSuffix}`, waitMs: 0 });
+			}
 			break;
 		case "release":
-			steps.push({ code: `PiBridge.AgentInput.ReleaseKey("${key}")`, label: `release ${key}`, waitMs: 0 });
+			steps.push({ code: `PiBridge.AgentInput.ReleaseKey("${key}")`, label: `release ${key}${labelSuffix}`, waitMs: 0 });
 			break;
 		case "interact":
 			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "interact", waitMs: 0 });
@@ -204,7 +257,7 @@ export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 			steps.push({ code: `PiBridge.AgentInput.Jump()`, label: "jump", waitMs: 0 });
 			break;
 		case "wait":
-			steps.push({ code: `"wait"`, label: "wait", waitMs: 0 });
+			steps.push({ code: `"wait"`, label: `wait${labelSuffix}`, waitMs: 0 });
 			break;
 	}
 

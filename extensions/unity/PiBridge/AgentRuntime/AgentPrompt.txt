@@ -1,28 +1,34 @@
-当前画面见附图。决定下一步动作。规则:
-- 每步只选一个原始动作，不能组合
-- press: 按住一个键开始持续动作，params.key 指定键：
-    W=前进, S=后退, A=左移, D=右移, Shift=冲刺(需配合 WASD),
-    TurnLeft=向左转视角, TurnRight=向右转视角
-- release: 松开一个键停止该动作，params.key 同上
-- interact: 交互（E 键），params 留空 {}
-- jump: 跳跃（空格），params 留空 {}
-- wait: 纯等待观察（不动），params 留空 {}
+当前画面见附图。已执行步骤见上文。决定下一步动作，输出一个 JSON。
 
-**操控模型（重要）**：像玩家一样按键。例：要前进就 press W，看到快到了就 release W。
-要转向就 press TurnLeft，转够了就 release TurnLeft。不猜时长，靠 press/release 控制。
-典型序列：press W（开始走）→ 几步后 release W（停下）→ press TurnLeft（转身找路）→ release TurnLeft。
+【最优先规则：不要原地不动】
+  任务要移动时，必须 press 某个键，不要 wait。
+  第一步（history 为空）禁止 wait，必须 press（W/S/A/D/TurnLeft/TurnRight 之一）。
+  连续 2 步 wait 是错误：若上一步是 wait 且任务未达成，这一步必须 press 某键。
+  reason 里写了"前进/移动/准备走"等词时，action 必须是 press，不能是 wait。
 
-**必须主动移动**：任务要求移动时必须用 press WASD，不要一直 wait。
-wait 只用于需要停下来观察画面的场景，不要连续多步 wait。
-如果任务目标不在当前画面中（看不到目标），必须先 press TurnLeft 或 TurnRight 四处环顾寻找，
-找到后 release 转向键 + press W 靠近。
+【输出格式】每步只选一个动作，输出对应 JSON：
+  press   开始按住某键（角色开始动）。key 必填。
+  release 松开某键（角色停）。key 必填。
+  interact 交互(E)。key 填 "None"。
+  jump    跳跃(空格)。key 填 "None"。
+  wait    仅当确实需要停下观察时才用，且不要连续。key 填 "None"。
+key 取值：W前进 S后退 A左移 D右移 Shift冲刺 TurnLeft左转 TurnRight右转
 
-- **按键管理**：按下的键持续生效直到 release。之前 press 了 W 还没 release，角色还在走——
-  要么继续走，要么 release W 停下。不要重复 press 同一个已按下的键。
-- **status 判断**：
-  - 画面已明显满足任务目标 → success
-  - 连续多步尝试后仍毫无进展（角色没动/反复撞墙）→ stuck
-  - 其他情况 → ongoing（首步必须是 ongoing，不要一上来就 stuck）
-  任务达成后立即 success，不要继续动作。
-  **不要轻易放弃**：只要还有可能推进，就返回 ongoing 并执行动作，不要 stuck。
-- 每步约持续 2 秒（推理时间），单键超 5 秒自动 release 兜底。
+【看不到目标怎么办】画面里看不到任务目标时，不要 wait，press TurnLeft 或 TurnRight 转视角找。找到后 release 转向键，再 press W 靠近。
+
+【press vs release 区别】
+  press = 开始按住，角色开始持续移动/转向。
+  release = 松开，停止该动作。松开键用 release，不是 press。
+  例：要前进就 press W，走几步后 release W 停下。
+
+【示例】
+  {"action":"press","params":{"key":"W"},"status":"ongoing","reason":"目标在前方，开始前进"}
+  {"action":"release","params":{"key":"W"},"status":"ongoing","reason":"已接近目标，停下观察"}
+  {"action":"press","params":{"key":"TurnLeft"},"status":"ongoing","reason":"找路，向左转视角"}
+
+【状态追踪】先看上方"当前 agent 状态"里的 pressedKeys：
+  - pressedKeys 里的键现在正按住、角色正在做该动作。
+  - 若 W 在 pressedKeys 里：还在走，要停就 release W，不要重复 press W。
+  - 不要重复 press 已在 pressedKeys 里的键。
+
+【status 判断】达成目标→success；确实无路(反复撞墙/不动)→stuck；其他→ongoing（首步必须 ongoing）。不要轻易 stuck。单键超 5 秒会自动 release。
