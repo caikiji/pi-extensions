@@ -1,10 +1,10 @@
 {
   "name": "pi-extensions",
-  "version": "0.1.0",
-  "description": "Personal pi extensions: unity, jump (others disabled)",
+  "version": "0.1.1",
+  "description": "Personal pi extensions: handoff, others disabled",
   "keywords": ["pi-package"],
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions/unity", "./extensions/handoff.ts"]
+    "extensions": ["./extensions/handoff.ts"]
   }
 }
