@@ -67,7 +67,7 @@ export interface AgentAction {
 		| "jump"
 		| "wait";
 	params: {
-		key?: "W" | "A" | "S" | "D" | "Shift" | "TurnLeft" | "TurnRight";
+		key: "W" | "A" | "S" | "D" | "Shift" | "TurnLeft" | "TurnRight" | "None";
 	};
 	status: "ongoing" | "success" | "stuck";
 	reason: string;
@@ -300,8 +300,12 @@ const ACTION_SCHEMA = {
 		params: {
 			type: "object",
 			properties: {
-				key: { type: "string", enum: ["W", "A", "S", "D", "Shift", "TurnLeft", "TurnRight"] },
+				// key 对所有动作必填。非 key 动作（interact/jump/wait）模型须填 "None"。
+				// strict 模式不支持条件必填（oneOf），用哨兵值 + 兜底层处理 press+None。
+				key: { type: "string", enum: ["W", "A", "S", "D", "Shift", "TurnLeft", "TurnRight", "None"] },
 			},
+			required: ["key"],
+			additionalProperties: false,
 		},
 		status: {
 			type: "string",
@@ -310,6 +314,7 @@ const ACTION_SCHEMA = {
 		reason: { type: "string" },
 	},
 	required: ["action", "params", "status", "reason"],
+	additionalProperties: false,
 };
 
 /**
