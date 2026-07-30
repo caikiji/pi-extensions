@@ -1,34 +1,44 @@
 当前画面见附图。已执行步骤见上文。决定下一步动作，输出一个 JSON。
 
+【核心范式：动作持续 duration_ms 后自动停】
+  所有动作都带 duration_ms，时间到了自动停，不需要“松开”。
+  你只需选「做什么 + 做多久」，不用记时序。duration_ms 范围 200~3000。
+
+【方向语义：转身 = 转朝向，移动 = 朝面朝方向走】
+  turn_left/turn_right 转身会改变角色朝向（画面跟着转）。
+  move_forward 永远朝角色当前面朝的方向走（就是画面正前方）。
+  所以：要换方向走，先 turn 转身，再 move_forward。
+  你看到的画面正前方 = move_forward 的方向，不会错乱。
+
 【最优先规则：不要原地不动】
-  任务要移动时，必须 press 某个键，不要 wait。
-  第一步（history 为空）禁止 wait，必须 press（W/S/A/D/TurnLeft/TurnRight 之一）。
-  连续 2 步 wait 是错误：若上一步是 wait 且任务未达成，这一步必须 press 某键。
-  reason 里写了"前进/移动/准备走"等词时，action 必须是 press，不能是 wait。
+  任务要移动时，必须选某个移动/转向动作，不要 wait。
+  第一步（history 为空）禁止 wait，必须 move 或 turn。
+  连续 2 步 wait 是错误：若上一步是 wait 且任务未达成，这一步必须 move 或 turn。
+  reason 里写了“前进/移动/准备走”等词时，action 必须是 move_*，不能是 wait。
 
 【输出格式】每步只选一个动作，输出对应 JSON：
-  press   开始按住某键（角色开始动）。key 必填。
-  release 松开某键（角色停）。key 必填。
-  interact 交互(E)。key 填 "None"。
-  jump    跳跃(空格)。key 填 "None"。
-  wait    仅当确实需要停下观察时才用，且不要连续。key 填 "None"。
-key 取值：W前进 S后退 A左移 D右移 Shift冲刺 TurnLeft左转 TurnRight右转
+  move_forward   向前走。duration_ms 越大走得越远。
+  move_backward  向后退。
+  move_left      向左平移。
+  move_right     向右平移。
+  turn_left      向左转身（改变角色朝向，画面跟着转）。duration_ms 1000 ≈ 转 90°。
+  turn_right     向右转身。duration_ms 1000 ≈ 转 90°。
+  interact       交互(E)。duration_ms 填 500。
+  jump           跳跃(空格)。duration_ms 填 500。
+  wait           原地等观察。duration_ms 决定等多久。不要连续用。
 
-【看不到目标怎么办】画面里看不到任务目标时，不要 wait，press TurnLeft 或 TurnRight 转视角找。找到后 release 转向键，再 press W 靠近。
+【duration_ms 取值参考】
+  走一小步：500    走几步接近目标：1000    走较长距离：1500~2000
+  小幅转向找路：500    转身找目标：1000    掉头：1500~2000
+  太短(200)看不清效果，太长(3000)会跑过头/转过头。
 
-【press vs release 区别】
-  press = 开始按住，角色开始持续移动/转向。
-  release = 松开，停止该动作。松开键用 release，不是 press。
-  例：要前进就 press W，走几步后 release W 停下。
+【看不到目标怎么办】画面里看不到任务目标时，不要 wait，用 turn_left 或 turn_right 转身找。转身后画面会变，能看到新的方向。找到目标后再 move_forward 朝它走。不要一直 move_right/move_left 平移——平移不改变朝向，看不到新画面。
 
 【示例】
-  {"action":"press","params":{"key":"W"},"status":"ongoing","reason":"目标在前方，开始前进"}
-  {"action":"release","params":{"key":"W"},"status":"ongoing","reason":"已接近目标，停下观察"}
-  {"action":"press","params":{"key":"TurnLeft"},"status":"ongoing","reason":"找路，向左转视角"}
+  {"action":"move_forward","params":{"duration_ms":1000},"status":"ongoing","reason":"目标在前方，前进1秒"}
+  {"action":"turn_left","params":{"duration_ms":800},"status":"ongoing","reason":"找路，向左转约70度"}
+  {"action":"move_right","params":{"duration_ms":600},"status":"ongoing","reason":"目标在右侧，向右平移"}
+  {"action":"interact","params":{"duration_ms":500},"status":"ongoing","reason":"已靠近目标，按E交互"}
+  {"action":"wait","params":{"duration_ms":500},"status":"ongoing","reason":"停下观察四周"}
 
-【状态追踪】先看上方"当前 agent 状态"里的 pressedKeys：
-  - pressedKeys 里的键现在正按住、角色正在做该动作。
-  - 若 W 在 pressedKeys 里：还在走，要停就 release W，不要重复 press W。
-  - 不要重复 press 已在 pressedKeys 里的键。
-
-【status 判断】达成目标→success；确实无路(反复撞墙/不动)→stuck；其他→ongoing（首步必须 ongoing）。不要轻易 stuck。单键超 5 秒会自动 release。
+【status 判断】达成目标→success；确实无路(反复撞墙/不动)→stuck；其他→ongoing（首步必须 ongoing）。不要轻易 stuck。

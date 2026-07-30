@@ -107,7 +107,6 @@ function mouseClickCode(x: number, y: number): string {
  * 返回的步骤按顺序执行：
  *   - move_forward/backward/left/right: keydown → (等游戏跑帧) → keyup
  *   - turn_left/right: mouse_event 移动（一次性，无需 keyup）
- *   - click: 鼠标定位 + 点击（一次性）
  *   - interact/jump: 单次 keydown + keyup（同一 eval）
  *   - wait: 不注入任何输入，纯等待
  *
@@ -136,19 +135,20 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
 			steps.push({ code: keyEventCode(VK.s, true), label: "S keydown", waitMs: dur });
 			steps.push({ code: keyEventCode(VK.s, false), label: "S keyup", waitMs: 200 });
 			break;
+		case "move_left":
+			steps.push({ code: keyEventCode(VK.a, true), label: "A keydown", waitMs: dur });
+			steps.push({ code: keyEventCode(VK.a, false), label: "A keyup", waitMs: 200 });
+			break;
+		case "move_right":
+			steps.push({ code: keyEventCode(VK.d, true), label: "D keydown", waitMs: dur });
+			steps.push({ code: keyEventCode(VK.d, false), label: "D keyup", waitMs: 200 });
+			break;
 		case "turn_left":
 			// 鼠标左移 → FollowCamera 的 yaw 减小（向左转）。移动量随 duration_ms 缩放。
 			steps.push({ code: mouseMoveCode(-Math.round(dur * 1.5), 0), label: `mouse left ${dur}ms`, waitMs: 300 });
 			break;
 		case "turn_right":
 			steps.push({ code: mouseMoveCode(Math.round(dur * 1.5), 0), label: `mouse right ${dur}ms`, waitMs: 300 });
-			break;
-		case "click":
-			steps.push({
-				code: mouseClickCode(action.params.x ?? 0.5, action.params.y ?? 0.5),
-				label: `click ${action.params.x ?? 0.5},${action.params.y ?? 0.5}`,
-				waitMs: 400,
-			});
 			break;
 		case "interact":
 			steps.push({ code: keyPressCode(VK.e), label: "E press", waitMs: 500 });
@@ -168,88 +168,63 @@ export function actionToSteps(action: AgentAction): ActionStep[] {
 /**
  * AgentInput 版本：把 action 翻译成 PiBridge.AgentInput 的 eval 调用。
  *
+ * 范式（2026-07-31 重构）：统一 duration_ms 语义，放弃 press/release 持续语义。
+ * 所有动作持续 duration_ms 后自动停，模型无需记得「松开」。move/turn 由 AgentInput
+ * 内部计时器（s_moveEndTime/s_turnEndTime）在 durationMs 后自动停。
+ *
  * 与 Win32 版本（actionToSteps）的区别：
  *   - 完全不碰 OS 输入（不 keybd_event/mouse_event），不捕获用户鼠标键盘。
- *   - Move/Turn 是一次 eval，AgentInput 内部计时器持续生效，无需 keydown/keyup 拆分。
+ *   - Move/Turn 是一次 eval，AgentInput 内部计时器持续生效。
  *   - 需要先调 AgentInput.TakeOver() 接管（禁用游戏 PlayerController + 释放鼠标），
  *     任务结束调 Release() 恢复。
- *   - interact/jump 当前仅置标记（旧 Input Manager 无法注入 GetKeyDown），游戏需有
- *     public 方法或 profile 才能真正触发——这里仍调用，预留 profile 扩展。
- *   - click 仍回退到 Win32（AgentInput 不处理 UI 点击；若项目无 UI 点击需求可忽略）。
+ *   - interact/jump 当前仅置标记（旧 Input Manager 无法注入 GetKeyDown）。
  *
- * 分级兜底（schema 现强制 key 必填，非 key 动作填 "None"）：
- *   - wait 误带真 key → press（保留意图）
- *   - press/release 漏 key（None/缺失）→ 先从 reason 文本推断 key；
- *     release 仍无 key 且有键按住 → release 最近按下的（"停掉一切"语义）；
- *     press 仍无 key 且无法推断 → wait（最后手段）
- *   - 重复 press 已按住的键 → 跳过注入（PressKey 重设 true 无害但浪费步）
- * 所有纠正都拼进 step.label，run_task 写回 history 让模型下一步看到并修正（闭环）。
+ * 动作映射（AgentInput API）：
+ *   - move_forward/backward/left/right → Move(x, z, durationMs)
+ *       W=前(z=1) S=后(z=-1) A=左(x=-1) D=右(x=1)
+ *   - turn_left/right → Turn(±yawDelta, 0, durationMs)
+ *       转向速率 90°/s：duration_ms 1000 ≈ 转 90°。turn_left yawDelta 为负。
+ *   - interact → Interact()，jump → Jump()，wait → 不注入输入
  *
- * @param action 模型决定的动作（schema 强制 key 必填）
- * @param pressedKeys 当前已按住的键（来自 GetPressedKeys，用于 release-all + 重复 press 检测）
+ * duration_ms 兜底：move/turn 缺失/越界→ 默认 800ms；interact/jump/wait 运行时
+ * 用默认值（interact/jump 不需 duration，wait 用 duration 作等待时长）。
+ *
+ * @param action 模型决定的动作
  * @returns eval 步骤数组，每步是 { code, label, waitMs }
+ *          waitMs=0：动作由 AgentInput 内部计时器驱动，run_task 负责按 duration_ms
+ *          采样帧（让游戏跑帧），不需 action-map 再额外 wait。
  */
-const VALID_KEYS = ["W", "A", "S", "D", "Shift", "TurnLeft", "TurnRight"];
-
-/**
- * 从模型 reason 文本里捞 key 名。模型常在 reason 里写 "release W" 却漏 params.key，
- * 这里捞出来兜底用。长串先匹配（TurnLeft/TurnRight/Shift 先于单字母，避免误匹配）。
- */
-function inferKeyFromReason(reason: string): string | undefined {
-	if (!reason) return undefined;
-	const ordered = ["TurnLeft", "TurnRight", "Shift", "W", "A", "S", "D"];
-	for (const k of ordered) if (reason.includes(k)) return k;
-	return undefined;
-}
-
-export function actionToAgentInputSteps(action: AgentAction, pressedKeys: string[] = []): ActionStep[] {
+export function actionToAgentInputSteps(action: AgentAction): ActionStep[] {
 	const steps: ActionStep[] = [];
-	let key: string = action.params.key;  // string 而非联合类型，便于从 reason/pressedKeys 推断赋值
-	// "None" 或缺失 → 视为漏 key（schema 现强制填值，缺失理论上不会发生）
-	const hasKey = !!key && key !== "None";
+	// duration_ms 兜底：schema 要求 200~3000，但防御性裁剪。
+	const dur = clampDuration(action.params.duration_ms, 800);
+	// 转向速率（度/秒）：90°/s 是合理的玩家转向速度，duration_ms*0.09 总度数。
+	// 例：1000ms→90°，500ms→45°，2000ms→180°。模型通过 duration 同时控制转向时长和角度。
+	const TURN_RATE_PER_MS = 0.09;
 
-	let effectiveAction = action.action;
-	let note = ""; // 纠正信息，拼进 step.label，run_task 写回 history 让模型下一步看到
-
-	// 兜底 1：wait 误带真 key（模型想 press 却选了 wait）→ 转 press，保留意图
-	if (effectiveAction === "wait" && hasKey) {
-		effectiveAction = "press";
-		note = "纠正：wait带key，按press执行";
-	}
-
-	// 兜底 2：press/release 漏 key（key 为 None/缺失）
-	if ((effectiveAction === "press" || effectiveAction === "release") && !hasKey) {
-		// 2a：从 reason 推断（模型常在 reason 写 "release W"）
-		const inferred = inferKeyFromReason(action.reason);
-		if (inferred) {
-			key = inferred;
-			note = `纠正：漏key，从reason推断为${inferred}`;
-		} else if (effectiveAction === "release" && pressedKeys.length > 0) {
-			// 2b：release 无 key 且有键按住 → release 最后按下的（"停掉一切"语义）
-			key = pressedKeys[pressedKeys.length - 1];
-			note = `纠正：release漏key，释放最近按键${key}`;
-		} else {
-			// 2c：press 无 key 且无法推断 → wait（最后手段，反馈给模型）
-			effectiveAction = "wait";
-			note = "纠正：press漏key且无法推断，转wait";
+	switch (action.action) {
+		case "move_forward":
+			steps.push({ code: `PiBridge.AgentInput.Move(0f, 1f, ${dur})`, label: `move forward ${dur}ms`, waitMs: 0 });
+			break;
+		case "move_backward":
+			steps.push({ code: `PiBridge.AgentInput.Move(0f, -1f, ${dur})`, label: `move backward ${dur}ms`, waitMs: 0 });
+			break;
+		case "move_left":
+			steps.push({ code: `PiBridge.AgentInput.Move(-1f, 0f, ${dur})`, label: `move left ${dur}ms`, waitMs: 0 });
+			break;
+		case "move_right":
+			steps.push({ code: `PiBridge.AgentInput.Move(1f, 0f, ${dur})`, label: `move right ${dur}ms`, waitMs: 0 });
+			break;
+		case "turn_left": {
+			const yaw = -dur * TURN_RATE_PER_MS;
+			steps.push({ code: `PiBridge.AgentInput.Turn(${yaw}f, 0f, ${dur})`, label: `turn left ~${Math.round(-yaw)}° ${dur}ms`, waitMs: 0 });
+			break;
 		}
-	}
-
-	// 重复 press 检测：press 一个已按住的键 → 跳过注入（角色本就在做该动作）
-	const willPressHeld = effectiveAction === "press" && !!key && key !== "None" && pressedKeys.includes(key);
-
-	const labelSuffix = note ? ` (${note})` : "";
-	switch (effectiveAction) {
-		case "press":
-			if (willPressHeld) {
-				steps.push({ code: `"already pressed ${key}"`, label: `press ${key} (跳过：已按住)`, waitMs: 0 });
-			} else {
-				steps.push({ code: `PiBridge.AgentInput.PressKey("${key}")`, label: `press ${key}${labelSuffix}`, waitMs: 0 });
-			}
+		case "turn_right": {
+			const yaw = dur * TURN_RATE_PER_MS;
+			steps.push({ code: `PiBridge.AgentInput.Turn(${yaw}f, 0f, ${dur})`, label: `turn right ~${Math.round(yaw)}° ${dur}ms`, waitMs: 0 });
 			break;
-		case "release":
-			steps.push({ code: `PiBridge.AgentInput.ReleaseKey("${key}")`, label: `release ${key}${labelSuffix}`, waitMs: 0 });
-			break;
+		}
 		case "interact":
 			steps.push({ code: `PiBridge.AgentInput.Interact()`, label: "interact", waitMs: 0 });
 			break;
@@ -257,9 +232,15 @@ export function actionToAgentInputSteps(action: AgentAction, pressedKeys: string
 			steps.push({ code: `PiBridge.AgentInput.Jump()`, label: "jump", waitMs: 0 });
 			break;
 		case "wait":
-			steps.push({ code: `"wait"`, label: `wait${labelSuffix}`, waitMs: 0 });
+			steps.push({ code: `"wait ${dur}ms"`, label: `wait ${dur}ms`, waitMs: 0 });
 			break;
 	}
 
 	return steps;
+}
+
+/** duration_ms 裁剪到合法范围 [200, 3000]，缺失/NaN 用 defaultVal。 */
+function clampDuration(v: number | undefined, defaultVal: number): number {
+	if (typeof v !== "number" || !Number.isFinite(v)) return defaultVal;
+	return Math.max(200, Math.min(3000, Math.round(v)));
 }

@@ -40,6 +40,16 @@ const VISION_MODEL = process.env.PI_VISION_MODEL ?? "minicpm-v";
  *  max_tokens 太小会被视觉 token 占满触发 length 截断返回空。实测 ≥ 512 安全。 */
 const VISION_MAX_TOKENS = Number(process.env.PI_VISION_MAX_TOKENS ?? 600);
 
+// ─── 帧采样配置（run_task 模式）───────────────────────────────────────────
+// 每步动作注入后，在 [0, duration_ms] 区间按 FPS 采样多帧，作为视觉历史
+// 送模型。让模型看到动作的效果（位移/旋转过程），而非只看决策瞬间单帧。
+// llama.cpp 多图保序 + prompt cache 命中稳定前缀，全量累积比滑动窗口更快。
+/** 采样帧率（帧/秒）。默认 1s 4 帧（每 250ms 一帧），可调。
+ *  PI_AGENT_FPS=2 → 1s 2 帧（稀疏，省 token）；8 → 1s 8 帧（密集，看清细节）。 */
+export const AGENT_FPS = Number(process.env.PI_AGENT_FPS ?? 4);
+/** 单步动作采样帧数硬上限（防 duration_ms 过大或 FPS 过高导致 prompt 膨胀）。
+ *  超出则等间隔降采样到该上限。默认 8 帧（2s 动作 @4fps 恰好 8 帧）。 */
+export const AGENT_MAX_FRAMES_PER_STEP = Number(process.env.PI_AGENT_MAX_FRAMES_PER_STEP ?? 8);
 /** 截图尺寸。MiniCPM-V 内部按 384 分块处理，再大无收益反而费带宽。 */
 export const CAPTURE_WIDTH = 384;
 export const CAPTURE_HEIGHT = 384;
@@ -59,15 +69,37 @@ export interface CaptureResult {
 }
 
 /** run_task 模式下，模型决定的一个原子动作。 */
+/** run_task 模式下，模型决定的一个原子动作。
+ *
+ * 范式（2026-07-31 重构）：统一 duration_ms 语义，彻底放弃 press/release 持续语义。
+ * 原因：press/release 要求模型记得「按住 → 适时松开」，1.3B 小模型多步状态追踪弱，
+ * 容易忘 release 导致角色持续移动/转向（转圈根因）。duration_ms 范式下「动作持续 N ms
+ * 后自动停」，模型只选「方向/旋转 + 时长」，无时序负担（见 proposals
+ * /2026-07-agent-decision-quality.md 第六节「现成退路」）。
+ *
+ * action 枚举：
+ *   - move_forward/backward/left/right：移动，duration_ms 后停。WASD 等价。
+ *   - turn_left/right：视角旋转固定角度后停（不再用 press TurnLeft 持续转）。
+ *   - interact：交互（E）。
+ *   - jump：跳跃（空格）。
+ *   - wait：原地等待观察。
+ */
 export interface AgentAction {
 	action:
-		| "press"
-		| "release"
+		| "move_forward"
+		| "move_backward"
+		| "move_left"
+		| "move_right"
+		| "turn_left"
+		| "turn_right"
 		| "interact"
 		| "jump"
 		| "wait";
 	params: {
-		key: "W" | "A" | "S" | "D" | "Shift" | "TurnLeft" | "TurnRight" | "None";
+		/** 动作持续毫秒数。move/turn 必填且决定位移/旋转幅度；
+		 * interact/jump/wait 可省略（schema 哨兵默认值，运行时兜底）。
+		 * 范围 200~3000，过短看不见效果，过长角色跑太远/转过头。 */
+		duration_ms: number;
 	};
 	status: "ongoing" | "success" | "stuck";
 	reason: string;
@@ -289,22 +321,35 @@ ${historyText}
 // JSON Schema 强制约束（llama.cpp response_format json_schema）.
 // Phase 0 + llama.cpp 迁移实测：100% 合法 + action 不越界 + 字段齐全。
 //
-// x/y 加 minimum/maximum，否则模型会输出 x:100 等越界值。
+// 范式：统一 duration_ms 语义（2026-07-31 重构）。所有动作带 duration_ms，
+// 转固定角度/走固定时长后自动停，消除 press/release 时序负担。
+// strict 模式要求所有 properties 进 required，duration_ms 始终必填；
+// interact/jump/wait 模型可填任意值（运行时兜底为默认值，不依赖具体值）。
 const ACTION_SCHEMA = {
 	type: "object",
 	properties: {
 		action: {
 			type: "string",
-			enum: ["press", "release", "interact", "jump", "wait"],
+			enum: [
+				"move_forward",
+				"move_backward",
+				"move_left",
+				"move_right",
+				"turn_left",
+				"turn_right",
+				"interact",
+				"jump",
+				"wait",
+			],
 		},
 		params: {
 			type: "object",
 			properties: {
-				// key 对所有动作必填。非 key 动作（interact/jump/wait）模型须填 "None"。
-				// strict 模式不支持条件必填（oneOf），用哨兵值 + 兜底层处理 press+None。
-				key: { type: "string", enum: ["W", "A", "S", "D", "Shift", "TurnLeft", "TurnRight", "None"] },
+				// duration_ms 对所有动作必填（strict 模式不支持条件必填）。
+				// move/turn 决定位移/旋转幅度；interact/jump/wait 运行时兜底为默认值。
+				duration_ms: { type: "integer", minimum: 200, maximum: 3000 },
 			},
-			required: ["key"],
+			required: ["duration_ms"],
 			additionalProperties: false,
 		},
 		status: {
