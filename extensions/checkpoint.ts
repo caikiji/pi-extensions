@@ -305,7 +305,7 @@ export async function restoreCheckpoint(
 			restored: [],
 			conflicts,
 			wouldDelete,
-			error: `${conflicts.length} file(s) changed since the checkpoint — use --force to overwrite them`,
+			error: `${conflicts.length} file(s) changed since the checkpoint - use --force to overwrite them`,
 		};
 	}
 
@@ -365,15 +365,15 @@ function fmtTs(ts: number): string {
 }
 
 export function formatEntries(entries: CheckpointEntry[], full = false): string {
-	if (entries.length === 0) return "no checkpoints yet — /checkpoint <msg> to save one";
+	if (entries.length === 0) return "no checkpoints yet - /checkpoint <msg> to save one";
 	const rows = entries.map((e) => {
 		const tag = e.auto ? "[auto] " : "";
 		const files = e.tracked.length + e.untracked.length;
 		const skip = e.skipped.length > 0 ? ` (+${e.skipped.length} skipped)` : "";
-		let row = `${e.id}  ${fmtTs(e.ts)}  ${tag}${e.msg} · ${files} file${files === 1 ? "" : "s"}${skip}`;
+		let row = `${e.id}  ${fmtTs(e.ts)}  ${tag}${e.msg} | ${files} file${files === 1 ? "" : "s"}${skip}`;
 		if (full && files > 0) {
 			row += "\n    " + [...e.tracked, ...e.untracked].slice(0, 12).join("  ");
-			if (e.tracked.length + e.untracked.length > 12) row += "  …";
+			if (e.tracked.length + e.untracked.length > 12) row += "  ...";
 		}
 		return row;
 	});
@@ -511,7 +511,7 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 					ctx.ui.notify(`restore: ${res.error}`, "error");
 					return;
 				}
-				ctx.ui.notify(`restored ${res.restored.length} file(s)${res.conflicts.length > 0 ? ` · ${res.conflicts.length} conflicts skipped` : ""}`, "info");
+				ctx.ui.notify(`restored ${res.restored.length} file(s)${res.conflicts.length > 0 ? ` | ${res.conflicts.length} conflicts skipped` : ""}`, "info");
 			} catch (err) {
 				ctx.ui.notify(`restore: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
