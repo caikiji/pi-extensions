@@ -273,6 +273,76 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   assert(g.includes("max depth 1 exceeded"), "subtree limit applied inside sub.md");
 }
 
+// ================= Test 13: /rules show — preview + guard paths =================
+{
+  // buildPreviewBlocks: expanded content per source, with headers
+  const fakeExp = {
+    cwd: TMP,
+    sources: [
+      { path: "~/agent-dir/RULES.md", kind: "global", lines: 3, bytes: 9, content: "- global rule", imports: [] },
+      { path: "RULES.md", kind: "project", lines: 12, bytes: 31, content: "- rule A\n@import expanded\n- rule B", imports: [{ spec: "docs/x.md", status: "ok", detail: "whole file", bytes: 22 }] },
+    ],
+    diagnostics: [],
+    totalBytes: 40,
+    generated: "",
+    limits: { maxDepth: 5, maxGlobFiles: 50, maxTotalBytes: 50 * 1024 },
+    settings: [],
+    fileStats: new Map(),
+  };
+  const blocks = mod.buildPreviewBlocks(fakeExp);
+  assert(blocks.title.includes("2 file(s) · 40 B · ~10 tokens"), "preview title shows stats");
+  assert(blocks.lines[0].includes("─ [global] ~/agent-dir/RULES.md"), "source header line present");
+  assert(blocks.lines.includes("- global rule"), "global content shown");
+  assert(blocks.lines.includes("@import expanded"), "expanded content shown (imports inlined)");
+  assert(blocks.lines.some((l) => l.includes("1 import(s)")), "import count noted");
+  assert(mod.buildPreviewBlocks(undefined).lines.length === 0, "no rules → empty blocks");
+
+  // makePreviewWindow: borders, scrolling, clamp, close
+  const fakeTheme = { fg: (_name, s) => s };
+  const fakeTruncate = (t, w) => t.slice(0, w);
+  const fakeVW = (t) => t.length;
+  const fakeMK = (data, key) => data === key;
+  const keys = { up: "up", down: "down", pageUp: "pageUp", pageDown: "pageDown", home: "home", end: "end", escape: "escape" };
+  let renders = 0;
+  let doneCalled = false;
+  const tui = { terminal: { rows: 40 }, requestRender: () => { renders++; } };
+  const wlines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
+  const win = mod.makePreviewWindow(tui, fakeTheme, () => { doneCalled = true; }, "T", wlines, fakeTruncate, fakeVW, fakeMK, keys, false);
+  const out = win.render(60);
+  assert(out[0].startsWith("┌─") && out[0].endsWith("┐"), "top border with title");
+  assert(out[out.length - 1].startsWith("└─") && out[out.length - 1].endsWith("┘"), "bottom border with status");
+  assert(out[1].startsWith("│") && out[1].endsWith("│"), "content rows bordered");
+  assert(out[1].includes("line 0"), "first content line shown");
+  assert(out.length === 32, "window height = contentHeight + 2 borders (30+2)");
+
+  win.handleInput("down");
+  assert(renders === 1, "scroll triggers requestRender");
+  assert(win.render(60)[1].includes("line 1"), "down scrolls one line");
+  win.handleInput("end");
+  assert(win.render(60)[1].includes("line 20"), "end clamps to last viewport");
+  win.handleInput("home");
+  assert(win.render(60)[1].includes("line 0"), "home jumps to top");
+  win.handleInput("up");
+  assert(win.render(60)[1].includes("line 0"), "up at top clamps");
+  win.handleInput("escape");
+  assert(doneCalled, "escape closes window");
+
+  // handler guard paths
+  let n;
+  await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {} }, reload: async () => {} });
+  assert(n[0] === "error" && n[1].includes("TUI"), "show outside TUI → error notify");
+
+  rmSync(join(TMP, "RULES.md"), { force: true });
+  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {}, custom: () => { throw new Error("custom must not run"); } }, reload: async () => {} });
+  assert(n[1].includes("No RULES.md"), "show without rules → error notify");
+
+  writeFileSync(join(TMP, "RULES.md"), "- fresh rule\n");
+  let customRan = false;
+  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {}, custom: () => { customRan = true; } }, reload: async () => {} });
+  assert(n[1].includes("not resolvable"), "plain-Node lazy import fails → degrade notify");
+  assert(!customRan, "custom never invoked on degrade");
+}
+
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 else process.env.PI_CODING_AGENT_DIR = prevAgentDir;

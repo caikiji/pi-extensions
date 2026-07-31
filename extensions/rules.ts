@@ -8,10 +8,11 @@
  * Usage:
  *   /rules          Show loaded rules, imports, and diagnostics (same as /rules list)
  *   /rules list     Same as above
+ *   /rules show     Preview the EXPANDED rules in a scrollable window
+ *                   (floating overlay by default, /rules show full = full screen, Esc closes)
  *   /rules init     Create a RULES.md template in the current directory
  *                   (--force overwrites an existing file, -g writes to the global agent dir)
  *   /rules reload   Re-read RULES.md files and rebuild the system prompt
- *
  * RULES.md syntax (loaded from ~/.pi/agent/RULES.md and <cwd>/RULES.md):
  *   <!-- comment -->                     comment; stripped at load, never reaches the prompt
  *   @import docs/x.md                    import a whole file (relative to THIS file's directory)
@@ -28,7 +29,8 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { KeyId } from "@earendil-works/pi-tui"; // type-only: erased at runtime
 
 // ============================================================================
 // Limits & template
@@ -138,6 +140,8 @@ interface SourceInfo {
   kind: "global" | "project";
   lines: number;
   bytes: number;
+  /** Expanded text: comments stripped, @imports inlined. What /rules show displays. */
+  content: string;
   imports: ImportInfo[];
 }
 
@@ -689,7 +693,7 @@ function computeExpansion(cwd: string): Expansion {
     );
     const content = out.join("\n");
     const lines = raw.split(/\r?\n/).length;
-    sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, imports });
+    sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, content, imports });
     blocks.push(`<rules_source path="${displayPath(c.path)}">\n${content}\n</rules_source>`);
     totalBytes += content.length;
   }
@@ -774,6 +778,150 @@ function buildReport(exp: Expansion | undefined): string[] {
 }
 
 // ============================================================================
+// Preview window (/rules show) — plain structural Component, lazy pi-tui
+// ============================================================================
+
+type PreviewDone = (result?: unknown) => void;
+type PreviewMatchesKey = (data: string, key: KeyId) => boolean;
+type PreviewTruncate = (text: string, maxWidth: number, ellipsis?: string, pad?: boolean) => string;
+interface PreviewKeys {
+  up: KeyId;
+  down: KeyId;
+  pageUp: KeyId;
+  pageDown: KeyId;
+  home: KeyId;
+  end: KeyId;
+  escape: KeyId;
+}
+
+/**
+ * Flatten expanded sources into one window: a header line per source plus
+ * its expanded content. Empty when no RULES.md exists.
+ */
+export function buildPreviewBlocks(exp: Expansion | undefined): { title: string; lines: string[] } {
+  if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", lines: [] };
+  const lines: string[] = [];
+  for (const s of exp.sources) {
+    const impNote = s.imports.length > 0 ? ` · ${s.imports.length} import(s)` : "";
+    lines.push(`─ [${s.kind}] ${s.path} — ${s.lines} lines · expanded ${fmtBytes(s.bytes)}${impNote}`);
+    lines.push(...s.content.split("\n"));
+    lines.push("");
+  }
+  return {
+    title: `RULES.md (expanded) — ${exp.sources.length} file(s) · ${fmtBytes(exp.totalBytes)} · ~${Math.round(exp.totalBytes / 4)} tokens`,
+    lines,
+  };
+}
+
+/**
+ * Scrollable bordered window as a plain structural Component (no pi-tui
+ * classes — keeps this file importable by tests with plain Node). All
+ * pi-tui functions are injected. Overlay by default; full screen when
+ * fullScreen is true.
+ */
+export function makePreviewWindow(
+  tui: { terminal: { rows: number }; requestRender: (force?: boolean) => void },
+  theme: Theme,
+  done: PreviewDone,
+  title: string,
+  lines: string[],
+  truncate: PreviewTruncate,
+  visibleWidth: (text: string) => number,
+  matchesKey: PreviewMatchesKey,
+  keys: PreviewKeys,
+  fullScreen: boolean,
+): { render: (width: number) => string[]; handleInput: (data: string) => void; invalidate: () => void } {
+  const contentHeight = () => {
+    const rows = tui.terminal.rows;
+    // full-screen: rough editor-area estimate; overlay: keep under maxHeight.
+    // Both leave room for the top and bottom border lines.
+    return Math.max(3, Math.floor(fullScreen ? rows - 10 : rows * 0.85 - 4));
+  };
+  let offset = 0;
+  const clamp = () => {
+    const max = Math.max(0, lines.length - contentHeight());
+    if (offset > max) offset = max;
+    if (offset < 0) offset = 0;
+  };
+  // ┌─ title ────────┐  (title styled accent, border dim)
+  const topBorder = (width: number): string => {
+    const t = theme.fg("accent", ` ${truncate(title, Math.max(4, width - 8), "…")} `);
+    const fill = Math.max(1, width - 3 - visibleWidth(t));
+    return theme.fg("dim", "┌─") + t + theme.fg("dim", "─".repeat(fill) + "┐");
+  };
+  // └─ status ───────┘
+  const bottomBorder = (text: string, width: number): string => {
+    const t = theme.fg("dim", truncate(text, Math.max(4, width - 6), "…"));
+    const fill = Math.max(1, width - 3 - visibleWidth(t));
+    return theme.fg("dim", "└─") + t + theme.fg("dim", "─".repeat(fill) + "┘");
+  };
+
+  return {
+    render(width: number): string[] {
+      clamp();
+      const h = contentHeight();
+      const inner = Math.max(1, width - 2);
+      const out: string[] = [topBorder(width)];
+      const bar = theme.fg("dim", "│");
+      for (let i = offset; i < offset + h && i < lines.length; i++) {
+        out.push(`${bar}${truncate(lines[i] ?? "", inner, "", true)}${bar}`);
+      }
+      while (out.length < h + 1) out.push(`${bar}${' '.repeat(inner)}${bar}`);
+      const first = offset + 1;
+      const last = Math.min(offset + h, lines.length);
+      const pct = lines.length > 0 ? Math.round((offset / Math.max(1, lines.length - h)) * 100) : 0;
+      out.push(bottomBorder(` ${first}–${last} / ${lines.length} (${pct}%) · ↑↓ PgUp/PgDn Home/End · Esc `, width));
+      return out;
+    },
+    handleInput(data: string): void {
+      if (matchesKey(data, keys.escape)) {
+        done();
+        return;
+      }
+      if (matchesKey(data, keys.up)) {
+        offset--;
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.down)) {
+        offset++;
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.pageUp)) {
+        offset -= contentHeight();
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.pageDown)) {
+        offset += contentHeight();
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.home)) {
+        offset = 0;
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.end)) {
+        offset = lines.length;
+        clamp();
+        tui.requestRender();
+        return;
+      }
+    },
+    invalidate(): void {
+      // no cached render state
+    },
+  };
+}
+
+
+// ============================================================================
 // Extension registration
 // ============================================================================
 
@@ -791,6 +939,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
     getArgumentCompletions: async (prefix) => {
       const opts = [
         { value: "list", label: "list", description: "Show loaded RULES.md files, imports, and diagnostics" },
+        { value: "show", label: "show", description: "Preview expanded rules in a scrollable window (full = full screen, Esc closes)" },
         { value: "init", label: "init", description: "Create a RULES.md template (--force overwrites, -g writes global)" },
         { value: "reload", label: "reload", description: "Re-read RULES.md files and rebuild the system prompt" },
       ];
@@ -818,6 +967,52 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         return;
       }
 
+      if (cmd === "show") {
+        const exp = getExpansion(ctx.cwd);
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          ctx.ui.notify("show requires the TUI — use list for the text report", "error");
+          return;
+        }
+        const { title, lines } = buildPreviewBlocks(exp);
+        if (lines.length === 0) {
+          ctx.ui.notify("No RULES.md found — run /rules init to create a template", "error");
+          return;
+        }
+        if (typeof ctx.ui.custom !== "function") {
+          ctx.ui.notify("Preview unavailable in this UI — use list for the text report", "error");
+          return;
+        }
+        // Lazy runtime import: resolved by pi's jiti alias to pi's bundled
+        // pi-tui. In plain-Node tests this import fails and we degrade to
+        // a notify instead of throwing.
+        let tui: typeof import("@earendil-works/pi-tui");
+        try {
+          tui = await import("@earendil-works/pi-tui");
+        } catch {
+          ctx.ui.notify("Preview unavailable (pi-tui not resolvable) — use list", "error");
+          return;
+        }
+        const { matchesKey, Key, truncateToWidth, visibleWidth } = tui;
+        const keys: PreviewKeys = {
+          up: Key.up,
+          down: Key.down,
+          pageUp: Key.pageUp,
+          pageDown: Key.pageDown,
+          home: Key.home,
+          end: Key.end,
+          escape: Key.escape,
+        };
+        const fullScreen = argv.includes("full");
+        await ctx.ui.custom(
+          (tuiInstance, theme, _kb, done) =>
+            makePreviewWindow(tuiInstance, theme, done, title, lines, truncateToWidth, visibleWidth, matchesKey, keys, fullScreen),
+          fullScreen
+            ? undefined
+            : { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", margin: 2 } },
+        );
+        return;
+      }
+
       if (cmd === "init") {
         const force = argv.includes("--force");
         const global = argv.includes("-g") || argv.includes("--global");
@@ -838,7 +1033,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      ctx.ui.notify(`Unknown subcommand "${cmd}" — use list | init | reload`, "error");
+      ctx.ui.notify(`Unknown subcommand "${cmd}" — use list | show | init | reload`, "error");
     },
   });
 }
