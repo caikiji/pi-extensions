@@ -97,3 +97,11 @@
 - summary 用祈使句（Add / Fix / Update / Remove...），不超过 72 字符
 - 一个提交只做一件事；`npm test` 通过后才提交
 - 不提交 tests/.work、node_modules 等运行时产物
+
+## 版本号规则 (versioning)
+
+- 提交前检查 package.json 的 version，需要 bump 时与改动同一提交推送
+- feat → minor 递增（0.0.2 → 0.1.0）
+- fix / refactor / style / test → patch 递增（0.0.2 → 0.0.3）
+- docs / chore → 不改版本号（仅文档或杂务时无需 bump）
+- 版本号只增不减；发布用 git tag 标记（如 v0.0.2）
