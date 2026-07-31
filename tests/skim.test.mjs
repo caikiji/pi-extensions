@@ -277,6 +277,32 @@ console.log("Test 10: regex literals do not break spans; output is pure ASCII");
 	assert(outline.includes("lines |") && !outline.includes("行"), "English units in header");
 }
 
+// ================= Test 11: bare dirs at depth limit, filter guard, desc first line =================
+console.log("Test 11: bare dirs at depth limit, filter guard, first-line desc");
+{
+	const d1 = mod.skimDir(TMP, 1);
+	const srcDir = d1.entries.find((e) => e.path === "src");
+	assert(srcDir !== undefined && srcDir.dir === true, "depth 1 lists src/ as a bare dir entry");
+	const flat = mod.formatDir(d1);
+	assert(flat.includes("src/ (dir)"), "formatDir marks bare dirs");
+	assert(!/[^\x00-\x7F]/.test(flat), "dir output pure ASCII");
+	let err = null;
+	try {
+		mod.formatOutline({ path: "f.ts", lang: "ts", lines: 1, bytes: 10, symbols: [] }, { filter: "[" });
+	} catch (e) { err = e.message; }
+	assert(typeof err === "string" && err.includes("invalid filter"), "invalid filter regex errors cleanly");
+	// multi-line docblock: desc is the first (summary) line, not the last
+	const src = [
+		"/** First line summary.",
+		" * Second line detail.",
+		" */",
+		"function two() { return 2; }",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const two = syms.find((s) => s.name === "two");
+	assert(two?.desc === "First line summary.", `desc is the first docblock line (got ${two?.desc})`);
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

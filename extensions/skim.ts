@@ -51,6 +51,7 @@ export interface SkimDirEntry {
 	bytes: number;
 	first?: string; // first meaningful line, truncated
 	entry: boolean; // looks like an entry point (package.json, index.ts, ...)
+	dir: boolean; // bare directory listed without recursion (depth limit reached)
 }
 
 export interface SkimDir {
@@ -503,8 +504,17 @@ function docBlockAbove(lines: string[], lineIdx: number): string | undefined {
 		}
 		break;
 	}
-	for (let k = collected.length - 1; k >= 0; k--) {
-		if (collected[k]) return collected[k];
+/** Decorative banner lines ("// ==== ... ====") must not become descriptions. */
+function isDecorative(s: string): boolean {
+	const t = s.trim();
+	if (t.length < 2) return false;
+	const edge = /[=\-*~#]/;
+	return edge.test(t[0]) && edge.test(t[t.length - 1]);
+}
+
+	// The first non-empty, non-decorative collected line is the summary (top of the block).
+	for (const line of collected) {
+		if (line && !isDecorative(line)) return line;
 	}
 	return undefined;
 }
@@ -924,7 +934,13 @@ function walkDir(
 				state.skipped++;
 				continue;
 			}
-			if (depth < maxDepth) walkDir(root, full, depth + 1, maxDepth, out, state);
+			if (depth < maxDepth) {
+				walkDir(root, full, depth + 1, maxDepth, out, state);
+			} else {
+				// At the depth limit the directory is listed as a bare entry
+				// (visible but not expanded).
+				out.push({ path: rel, lines: 0, bytes: 0, first: undefined, entry: false, dir: true });
+			}
 			continue;
 		}
 		if (name.startsWith(".") || JUNK_FILES.test(name)) {
@@ -937,6 +953,7 @@ function walkDir(
 			bytes: st.size,
 			first: undefined,
 			entry: ENTRY_NAMES.has(name) || ENTRY_RE.test(name) || /^README\./i.test(name),
+			dir: false,
 		};
 		// One read serves both the line count and the first meaningful line.
 		try {
@@ -958,12 +975,13 @@ export function skimDir(root: string, depth = 1, limit = 150): SkimDir {
 	walkDir(root, root, 1, Math.max(1, Math.min(4, depth)), entries, state);
 	const truncated = entries.length > limit;
 	const shown = truncated ? entries.slice(0, limit) : entries;
-	// Sort: entry files first, then files before nested dirs, alphabetical.
+	// Sort: entry files first, then files, then nested paths, then bare dirs, alphabetical.
 	shown.sort((a, b) => {
-		const aDir = a.path.includes(sep);
-		const bDir = b.path.includes(sep);
+		const nestedA = a.path.includes(sep);
+		const nestedB = b.path.includes(sep);
 		if (a.entry !== b.entry) return a.entry ? -1 : 1;
-		if (aDir !== bDir) return aDir ? 1 : -1; // files before nested dirs
+		if (a.dir !== b.dir) return a.dir ? 1 : -1; // bare dirs last
+		if (nestedA !== nestedB) return nestedA ? 1 : -1; // files before nested dirs
 		return a.path.localeCompare(b.path);
 	});
 	return { path: root, entries: shown, total: shown.length, skipped: state.skipped, truncated };
@@ -1079,7 +1097,14 @@ const KIND_LABEL: Record<string, string> = {
 export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: number; filter?: string }): string {
 	const full = opts.full ?? false;
 	const limit = opts.limit ?? 150;
-	const filter = opts.filter ? new RegExp(opts.filter) : null;
+	let filter: RegExp | null = null;
+	if (opts.filter) {
+		try {
+			filter = new RegExp(opts.filter);
+		} catch {
+			throw new Error(`invalid filter regex: ${opts.filter}`);
+		}
+	}
 	const nameMax = full ? 200 : 80;
 	const descMax = full ? 160 : 60;
 
@@ -1111,10 +1136,11 @@ export function formatDir(dir: SkimDir): string {
 	const header = `${basename(dir.path) || dir.path} (${dir.total} entries${dir.skipped > 0 ? ` | ${dir.skipped} skipped` : ""}${dir.truncated ? " | truncated" : ""})`;
 	const rows = dir.entries.map((e) => {
 		const mark = e.entry ? "* " : "  ";
-		const size = fmtBytes(e.bytes);
+		const name = e.dir ? `${e.path}/` : e.path;
+		const size = e.dir ? "dir" : fmtBytes(e.bytes);
 		const lines = e.lines > 0 ? ` | ${e.lines} lines` : "";
 		const first = e.first ? ` - ${e.first}` : "";
-		return `${mark}${e.path} (${size}${lines})${first}`;
+		return `${mark}${name} (${size}${lines})${first}`;
 	});
 	return [header, ...rows].join("\n");
 }
