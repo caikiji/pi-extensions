@@ -1,0 +1,16 @@
+{
+  "name": "pi-extensions",
+  "version": "0.0.1",
+  "description": "Personal pi extension: handoff",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/handoff.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
