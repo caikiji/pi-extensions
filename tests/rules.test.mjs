@@ -277,11 +277,10 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   // content segments: muted header + plain content
   const muted = blocks.segments.filter((s) => s.style === "muted");
   assert(muted.length === 2 && muted.every((s) => s.lines.length === 1), "one muted header per source");
-  assert(muted[0].lines[0].includes("─ [global] ~/agent-dir/RULES.md — 3 lines · expanded 9 B"), "content header line present");
+  assert(muted[0].lines[0].includes("─ [global] ~/agent-dir/RULES.md ─"), "content header is a brief chapter label");
   const plain = blocks.segments.filter((s) => s.style === "plain");
   assert(plain.some((s) => s.lines.includes("- global rule")), "global content shown");
   assert(plain.some((s) => s.lines.includes("@import expanded")), "expanded content shown (imports inlined)");
-  assert(all.includes("1 import(s)"), "import count noted");
   assert(mod.buildPreviewBlocks(undefined).segments.length === 0, "no rules → empty blocks");
 
   // makePreviewWindow: styled segments, borders, scrolling, clamp, close

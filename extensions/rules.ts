@@ -820,10 +820,11 @@ export function buildPreviewBlocks(exp: Expansion | undefined): { title: string;
     { style: "dim", lines: [""] },
   ];
   for (const s of exp.sources) {
-    const impNote = s.imports.length > 0 ? ` · ${s.imports.length} import(s)` : "";
+    // brief chapter label only — the report segment above already carries
+    // the full stats (lines, bytes, import statuses)
     segments.push({
       style: "muted",
-      lines: [`─ [${s.kind}] ${s.path} — ${s.lines} lines · expanded ${fmtBytes(s.bytes)}${impNote}`],
+      lines: [`─ [${s.kind}] ${s.path} ─`],
     });
     segments.push({ style: "plain", lines: s.content.split("\n") });
     segments.push({ style: "plain", lines: [""] });
