@@ -15,7 +15,8 @@
  * Personal divergences:
  *   1. One-off generation calls use cacheRetention "none" + a fresh sessionId,
  *      so they neither read nor pollute the session's provider prompt cache.
- *   2. The generated prompt follows the language of the goal text.
+ *   2. The generated prompt is state-focused (unfinished work, uncommitted
+ *      changes) and follows the goal's language (code/file names as-is).
  *   3. Generation failures notify the reason instead of showing "Cancelled".
  */
 
@@ -25,15 +26,15 @@ import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
-const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
+const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused handoff prompt that:
 
-1. Summarizes relevant context from the conversation (decisions made, approaches taken, key findings)
-2. Lists any relevant files that were discussed or modified
-3. Clearly states the next task based on the user's goal
-4. Is self-contained - the new thread should be able to proceed without the old conversation
+1. Captures the current state: what was done, what is unfinished, and any uncommitted changes mentioned in the conversation
+2. Records decisions, approaches taken, and key findings - not step-by-step implementation details the new thread can re-derive
+3. Lists files that were discussed or modified, each with a one-line note on its role or status. Do NOT paste file contents; the new thread can read the files itself
+4. Clearly states the next task based on the user's goal. If the goal is vague, infer the most likely next step from the conversation
+5. Is self-contained - the new thread should be able to proceed without the old conversation
 
-Format your response as a prompt the user can send to start the new thread. Be concise but include all necessary context. Do not include any preamble like "Here's the prompt" - just output the prompt itself.
-Write the prompt in the same language as the user's goal text.
+Format your response as a prompt the user can send to start the new thread. Start directly with "## Context" - no preamble like "Here's the prompt". Write in the same language as the user's goal text; keep code, file names, and identifiers in their original form.
 
 Example output format:
 ## Context
@@ -42,8 +43,11 @@ We've been working on X. Key decisions:
 - Decision 2
 
 Files involved:
-- path/to/file1.ts
-- path/to/file2.ts
+- path/to/file1.ts (modified: what changed and why)
+- path/to/file2.ts (new: what it does)
+
+## State
+Unfinished: ...; uncommitted changes: ... (if any)
 
 ## Task
 [Clear description of what to do next based on user's goal]`;
