@@ -69,7 +69,7 @@
 
 ## 决策与理由 (why, not how)
 
-- 扩展用零依赖单文件 TS：pi 用 jiti 加载扩展，第三方包在 git package 里解析脆弱——所以 getAgentDir 是本地实现，不 import pi 运行时
+- 扩展用零第三方依赖单文件 TS：只允许 @earendil-works/*（pi 自带包，jiti alias 解析到 pi 安装目录）运行时 import，第三方 npm 包禁止（git package 里解析脆弱）；被 tests/*.test.mjs 直接 import 的 .ts 顶层不得静态 import pi 运行时包（纯 Node 解析不到），需要时用动态 import 或结构化组件
 - 代码注释用英文，用户文档（模板/README）可双语：注释是给代码看的，文档是给人看的
 - 测试放 tests/*.test.mjs，用 Node ≥22.18 原生类型剥离直接 import .ts：零 npm install 就能跑
 - 新增扩展必须同时注册到 package.json 的 pi.extensions 和 README 表格
@@ -77,7 +77,8 @@
 ## 约束与陷阱 (not visible in the code)
 
 - 扩展代码只用 erasable TS 语法（无 enum / namespace / 构造器参数属性）——否则 tests 直接 import .ts 会崩
-- 改了 rules.ts 必须跑 `npm test`（56 断言，覆盖注释剥离/导入/防环/@rules/缓存）
+- 动态 import("@earendil-works/pi-tui") 只在 TUI 命令路径执行；纯 Node 测试环境解析必败，必须 catch 降级（notify 错误提示），不能抛到 handler 外
+- 改了 rules.ts 必须跑 `npm test`（覆盖注释剥离/导入/防环/@rules/缓存/list 与 show 命令）
 - 模板头注释内禁止出现字面 <!-- -->（CommonMark 在第一个 --> 截断，会泄漏到预览）——示例一律用 &lt;!-- 实体
 - 不要把 tests/.work 提交进 git
 
