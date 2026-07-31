@@ -799,7 +799,7 @@ interface PreviewKeys {
  * Flatten expanded sources into one window: a header line per source plus
  * its expanded content. Empty when no RULES.md exists.
  */
-export type PreviewStyle = "dim" | "muted" | "plain";
+export type PreviewStyle = "dim" | "plain";
 
 export interface PreviewSegment {
   style: PreviewStyle;
@@ -820,12 +820,6 @@ export function buildPreviewBlocks(exp: Expansion | undefined): { title: string;
     { style: "dim", lines: [""] },
   ];
   for (const s of exp.sources) {
-    // brief chapter label only — the report segment above already carries
-    // the full stats (lines, bytes, import statuses)
-    segments.push({
-      style: "muted",
-      lines: [`─ [${s.kind}] ${s.path} ─`],
-    });
     segments.push({ style: "plain", lines: s.content.split("\n") });
     segments.push({ style: "plain", lines: [""] });
   }
@@ -863,8 +857,7 @@ export function makePreviewWindow(
     }
   }
   const styleLine = (i: number, text: string): string => {
-    const s = flatStyle[i] ?? "plain";
-    return s === "dim" ? theme.fg("dim", text) : s === "muted" ? theme.fg("muted", text) : text;
+    return (flatStyle[i] ?? "plain") === "dim" ? theme.fg("dim", text) : text;
   };
   const contentHeight = () => {
     const rows = tui.terminal.rows;

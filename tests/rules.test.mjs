@@ -274,10 +274,7 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   assert(all.includes("Settings (from RULES.md):") && all.includes("⚙ max_depth = 2 (RULES.md)"), "settings in report");
   assert(all.includes("Diagnostics:") && all.includes('unknown @rules key "bogus"'), "diagnostics in report");
   assert(all.includes("0 error(s) · 1 warning(s)"), "summary line present");
-  // content segments: muted header + plain content
-  const muted = blocks.segments.filter((s) => s.style === "muted");
-  assert(muted.length === 2 && muted.every((s) => s.lines.length === 1), "one muted header per source");
-  assert(muted[0].lines[0].includes("─ [global] ~/agent-dir/RULES.md ─"), "content header is a brief chapter label");
+  // content segments: plain content only (report above carries attribution)
   const plain = blocks.segments.filter((s) => s.style === "plain");
   assert(plain.some((s) => s.lines.includes("- global rule")), "global content shown");
   assert(plain.some((s) => s.lines.includes("@import expanded")), "expanded content shown (imports inlined)");
@@ -296,7 +293,6 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   const wlines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
   const segs = [
     { style: "dim", lines: ["meta 1", "meta 2"] },
-    { style: "muted", lines: ["─ header"] },
     { style: "plain", lines: wlines },
   ];
   const win = mod.makePreviewWindow(tui, fakeTheme, () => { doneCalled = true; }, "T", segs, fakeTruncate, fakeVW, fakeMK, keys, false);
@@ -305,20 +301,19 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   assert(out[out.length - 1].startsWith("└─") && out[out.length - 1].endsWith("┘"), "bottom border with status");
   assert(out[1].startsWith("│") && out[1].endsWith("│"), "content rows bordered");
   assert(out[1].includes("meta 1"), "first line is the report segment");
-  assert(out[3].includes("─ header"), "muted header rendered");
-  assert(out[4].includes("line 0"), "first content line shown");
+  assert(out[3].includes("line 0"), "first content line shown");
   assert(out.length === 32, "window height = contentHeight + 2 borders (30+2)");
-  assert(fgCalls.includes("dim") && fgCalls.includes("muted") && fgCalls.includes("accent"), "dim/muted/accent styles applied");
+  assert(fgCalls.includes("dim") && fgCalls.includes("accent"), "dim/accent styles applied");
 
   win.handleInput("down");
   assert(renders === 1, "scroll triggers requestRender");
-  assert(win.render(60)[4].includes("line 1"), "down scrolls one line");
+  assert(win.render(60)[3].includes("line 1"), "down scrolls one line");
   win.handleInput("end");
-  assert(win.render(60)[4].includes("line 23"), "end clamps to last viewport (53-30)");
+  assert(win.render(60)[3].includes("line 22"), "end clamps to last viewport (52-30)");
   win.handleInput("home");
-  assert(win.render(60)[4].includes("line 0"), "home jumps to top");
+  assert(win.render(60)[3].includes("line 0"), "home jumps to top");
   win.handleInput("up");
-  assert(win.render(60)[4].includes("line 0"), "up at top clamps");
+  assert(win.render(60)[3].includes("line 0"), "up at top clamps");
   win.handleInput("escape");
   assert(doneCalled, "escape closes window");
 
