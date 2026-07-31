@@ -7,7 +7,7 @@ Personal [pi](https://github.com/earendil-works/pi) extensions。
 | 扩展 | 说明 |
 |------|------|
 | handoff | 按目标提取当前会话关键上下文，生成可编辑的提示词并开新会话（相比 compact：针对性强、可审阅、父会话保留可回溯）。基于官方 example 定制：交接单聚焦未完成状态与下一步、生成语言跟随目标（代码/文件名保持原文）、一次性生成请求隔离 provider 缓存、失败明确报错 |
-| rules | RULES.md 恒真规则管理器：`/rules list | show | init | reload`，支持 `@import` 精细导入（单文件 / `#标题` section / `*` `**` `?` glob / 递归 5 层 / 防环去重）与 `@rules` 可配置参数（max_depth / max_glob_files / max_total_bytes），`<!-- -->` 注释剥离，展开结果注入 system prompt；`show` 在 TUI 中以可滚动窗口（overlay，`full` 全屏）预览展开内容 |
+| rules | RULES.md 恒真规则管理器：`/rules show | init | reload`，支持 `@import` 精细导入（单文件 / `#标题` section / `*` `**` `?` glob / 递归 5 层 / 防环去重）与 `@rules` 可配置参数（max_depth / max_glob_files / max_total_bytes），`<!-- -->` 注释剥离，展开结果注入 system prompt；`show` 在 TUI 中以可滚动窗口展示报告 + 展开内容（overlay，`full` 全屏，Esc 关闭），非 TUI 下输出文本报告 |
 
 ## 安装
 

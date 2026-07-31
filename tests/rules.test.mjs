@@ -137,17 +137,6 @@ console.log("Test 3: whole-file, section, glob, nested, escape, missing");
   const srcContent = g.slice(g.indexOf("<rules_source") + `<rules_source path="${disp(TMP)}/RULES.md">`.length, g.indexOf("</rules_source>")).trim();
   assert(srcContent.startsWith("# My Rules"), "leading blank lines trimmed");
   assert(srcContent.endsWith("- split into packages"), "trailing blank lines trimmed");
-  // list report
-  const widget = { lines: null };
-  const ui = { notify: () => {}, setWidget: (k, v) => { widget.lines = v; } };
-  await commands.rules.handler("list", { cwd: TMP, hasUI: true, mode: "tui", ui, reload: async () => {} });
-  const rep = widget.lines.join("\n");
-  assert(rep.includes("✓ @import docs/conventions.md — whole file"), "list shows ok import");
-  assert(rep.includes("✓ @import docs/architecture.md#Data Flow — section"), "list shows section import");
-  assert(rep.includes("✓ @import docs/patterns/*.md — 2 files"), "list shows glob count");
-  assert(rep.includes("✗ @import docs/missing-file.md — file not found"), "list shows error import");
-  assert(rep.includes("⚠ @import docs/empty-*.md — glob matched no files"), "list shows empty glob warning");
-  assert(rep.includes("error(s)"), "summary line present");
 }
 
 // ================= Test 4: cycle detection =================
@@ -158,12 +147,6 @@ console.log("Test 4: circular imports detected");
   writeFileSync(join(TMP, "RULES.md"), "@import a.md\n");
   const r = await inject(TMP);
   assert(r.systemPrompt.includes("circular import"), "cycle marked in output");
-  const rep = await (async () => {
-    const w = { lines: null };
-    await commands.rules.handler("list", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: () => {}, setWidget: (k, v) => { w.lines = v; } }, reload: async () => {} });
-    return w.lines.join("\n");
-  })();
-  assert(rep.includes("circular import"), "cycle in diagnostics");
 }
 
 // ================= Test 5: dedup =================
@@ -202,10 +185,6 @@ console.log("Test 7: cache invalidation on change");
 console.log("Test 8: unclosed comment");
 {
   writeFileSync(join(TMP, "RULES.md"), "- rule one\n\n<!-- never closed\n\n- rule two\n");
-  const w = { lines: null };
-  await commands.rules.handler("list", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: () => {}, setWidget: (k, v) => { w.lines = v; } }, reload: async () => {} });
-  const rep = w.lines.join("\n");
-  assert(rep.includes("unclosed comment"), "unclosed comment warning shown");
   const r = await inject(TMP);
   assert(!r.systemPrompt.includes("- rule two"), "rest of file treated as comment");
 }
@@ -251,20 +230,8 @@ console.log("Test 10: global RULES.md honored");
   assert(g.includes("max depth 2 exceeded"), "depth error uses configured limit");
   assert(!g.includes("@rules max_depth 2"), "@rules directive lines not in prompt");
   assert(g.includes("max_depth 9"), "escaped @rules kept as literal text");
-
-  // glob limit: r2.md's subtree contains r3.md+r4.md but only 1 import happens below;
-  // instead verify with a glob in RULES.md itself
-  const w = { lines: null };
-  const ui = { notify: () => {}, setWidget: (k, v) => { w.lines = v; } };
-  await commands.rules.handler("list", { cwd: TMP, hasUI: true, mode: "tui", ui, reload: async () => {} });
-  const rep = w.lines.join("\n");
-  assert(rep.includes("limits: depth 2 · glob ≤ 1 files · total ≤ 100 B · overridden in RULES.md"), "limits line shows overrides");
-  assert(rep.includes("Settings (from RULES.md):"), "settings section present");
-  assert(rep.includes("⚙ max_depth = 2"), "setting recorded with value");
-  assert(rep.includes('unknown @rules key "bogus"'), "unknown key warned");
-  assert(rep.includes("max_depth expects a positive integer"), "invalid value warned");
-  assert(rep.includes("total expanded size") && rep.includes("100 B"), "total size warning uses configured limit");
 }
+
 
 // ================= Test 12: @rules scoping in imported files =================
 console.log("Test 12: @rules in imported files affects only their subtree");
@@ -281,23 +248,32 @@ console.log("Test 12: @rules in imported files affects only their subtree");
 
 // ================= Test 13: /rules show — preview + guard paths =================
 {
-  // buildPreviewBlocks: expanded content per source, with headers
+  // buildPreviewBlocks: report first, then expanded content per source
   const fakeExp = {
     cwd: TMP,
     sources: [
       { path: "~/agent-dir/RULES.md", kind: "global", lines: 3, bytes: 9, content: "- global rule", imports: [] },
       { path: "RULES.md", kind: "project", lines: 12, bytes: 31, content: "- rule A\n@import expanded\n- rule B", imports: [{ spec: "docs/x.md", status: "ok", detail: "whole file", bytes: 22 }] },
     ],
-    diagnostics: [],
+    diagnostics: [{ level: "warning", message: 'RULES.md: unknown @rules key "bogus"' }],
     totalBytes: 40,
     generated: "",
-    limits: { maxDepth: 5, maxGlobFiles: 50, maxTotalBytes: 50 * 1024 },
-    settings: [],
+    limits: { maxDepth: 2, maxGlobFiles: 1, maxTotalBytes: 100 },
+    settings: [{ source: "RULES.md", key: "max_depth", value: "2" }],
     fileStats: new Map(),
   };
   const blocks = mod.buildPreviewBlocks(fakeExp);
+  const all = blocks.lines.join("\n");
   assert(blocks.title.includes("2 file(s) · 40 B · ~10 tokens"), "preview title shows stats");
-  assert(blocks.lines[0].includes("─ [global] ~/agent-dir/RULES.md"), "source header line present");
+  // report section first (what list used to show)
+  assert(blocks.lines[0].startsWith("Rules: 2 file(s)"), "report leads the window");
+  assert(all.includes("limits: depth 2 · glob ≤ 1 files · total ≤ 100 B · overridden in RULES.md"), "limits line in report");
+  assert(all.includes("✓ @import docs/x.md — whole file · 22 B"), "import status in report");
+  assert(all.includes("Settings (from RULES.md):") && all.includes("⚙ max_depth = 2 (RULES.md)"), "settings in report");
+  assert(all.includes("Diagnostics:") && all.includes('unknown @rules key "bogus"'), "diagnostics in report");
+  assert(all.includes("1 error(s) · 0 warning(s)") || all.includes("0 error(s) · 1 warning(s)"), "summary line present");
+  // then the content section
+  assert(all.includes("─ [global] ~/agent-dir/RULES.md — 3 lines · expanded 9 B"), "content header line present");
   assert(blocks.lines.includes("- global rule"), "global content shown");
   assert(blocks.lines.includes("@import expanded"), "expanded content shown (imports inlined)");
   assert(blocks.lines.some((l) => l.includes("1 import(s)")), "import count noted");
@@ -335,17 +311,18 @@ console.log("Test 12: @rules in imported files affects only their subtree");
 
   // handler guard paths
   let n;
-  await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {} }, reload: async () => {} });
-  assert(n[0] === "error" && n[1].includes("TUI"), "show outside TUI → error notify");
+  // outside the TUI: falls back to the text report (what list used to print)
+  await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; } }, reload: async () => {} });
+  assert(n[0] === "info" && n[1].includes("Rules: 1 file(s)"), "show outside TUI → text report");
 
   rmSync(join(TMP, "RULES.md"), { force: true });
-  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {}, custom: () => { throw new Error("custom must not run"); } }, reload: async () => {} });
+  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, custom: () => { throw new Error("custom must not run"); } }, reload: async () => {} });
   assert(n[1].includes("No RULES.md"), "show without rules → error notify");
 
   writeFileSync(join(TMP, "RULES.md"), "- fresh rule\n");
   let customRan = false;
-  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, setWidget: () => {}, custom: () => { customRan = true; } }, reload: async () => {} });
-  assert(n[1].includes("not resolvable"), "plain-Node lazy import fails → degrade notify");
+  await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, custom: () => { customRan = true; } }, reload: async () => {} });
+  assert(n[0] === "info" && n[1].includes("Rules: 1 file(s)"), "plain-Node lazy import fails → text report");
   assert(!customRan, "custom never invoked on degrade");
 }
 

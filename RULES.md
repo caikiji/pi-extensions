@@ -78,7 +78,7 @@
 
 - 扩展代码只用 erasable TS 语法（无 enum / namespace / 构造器参数属性）——否则 tests 直接 import .ts 会崩
 - 动态 import("@earendil-works/pi-tui") 只在 TUI 命令路径执行；纯 Node 测试环境解析必败，必须 catch 降级（notify 错误提示），不能抛到 handler 外
-- 改了 rules.ts 必须跑 `npm test`（覆盖注释剥离/导入/防环/@rules/缓存/list 与 show 命令）
+- 改了 rules.ts 必须跑 `npm test`（覆盖注释剥离/导入/防环/@rules/缓存/show 命令）
 - 模板头注释内禁止出现字面 <!-- -->（CommonMark 在第一个 --> 截断，会泄漏到预览）——示例一律用 &lt;!-- 实体
 - 不要把 tests/.work 提交进 git
 

@@ -6,10 +6,9 @@
  * agents must follow it and ask the user when it conflicts with reality.
  *
  * Usage:
- *   /rules          Show loaded rules, imports, and diagnostics (same as /rules list)
- *   /rules list     Same as above
- *   /rules show     Preview the EXPANDED rules in a scrollable window
- *                   (floating overlay by default, /rules show full = full screen, Esc closes)
+ *   /rules [show]   Show the rules report + EXPANDED content in a scrollable window
+ *                   (floating overlay by default, "full" = full screen, Esc closes;
+ *                   outside the TUI it prints the text report)
  *   /rules init     Create a RULES.md template in the current directory
  *                   (--force overwrites an existing file, -g writes to the global agent dir)
  *   /rules reload   Re-read RULES.md files and rebuild the system prompt
@@ -802,7 +801,9 @@ interface PreviewKeys {
  */
 export function buildPreviewBlocks(exp: Expansion | undefined): { title: string; lines: string[] } {
   if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", lines: [] };
-  const lines: string[] = [];
+  // Report first (what /rules list used to show), then the expanded content.
+  const lines: string[] = buildReport(exp);
+  lines.push("");
   for (const s of exp.sources) {
     const impNote = s.imports.length > 0 ? ` · ${s.imports.length} import(s)` : "";
     lines.push(`─ [${s.kind}] ${s.path} — ${s.lines} lines · expanded ${fmtBytes(s.bytes)}${impNote}`);
@@ -937,11 +938,10 @@ export default function rulesExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("rules", {
     description:
-      "Manage RULES.md ground-truth rules: list loaded rules and diagnostics, init a template, reload into the system prompt",
+      "Manage RULES.md ground-truth rules: show report and expanded rules in a window, init a template, reload into the system prompt",
     getArgumentCompletions: async (prefix) => {
       const opts = [
-        { value: "list", label: "list", description: "Show loaded RULES.md files, imports, and diagnostics" },
-        { value: "show", label: "show", description: "Preview expanded rules in a scrollable window (full = full screen, Esc closes)" },
+        { value: "show", label: "show", description: "Show report + expanded rules in a scrollable window (full = full screen, Esc closes)" },
         { value: "init", label: "init", description: "Create a RULES.md template (--force overwrites, -g writes global)" },
         { value: "reload", label: "reload", description: "Re-read RULES.md files and rebuild the system prompt" },
       ];
@@ -950,29 +950,14 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         .map((o) => ({ value: o.value, label: o.label, description: o.description }));
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      ctx.ui.setWidget("rules-report", undefined); // clear any previous report
       const argv = args.trim().split(/\s+/).filter(Boolean);
-      const cmd = argv[0] ?? "list";
-
-      if (cmd === "list") {
-        const exp = getExpansion(ctx.cwd);
-        const report = buildReport(exp);
-        if (ctx.hasUI && ctx.mode === "tui") {
-          ctx.ui.setWidget("rules-report", report);
-          ctx.ui.notify(
-            `Rules: ${exp && exp.sources.length > 0 ? exp.sources.length : 0} file(s) loaded — dismiss widget or run /rules again`,
-            "info",
-          );
-        } else {
-          ctx.ui.notify(report.join("\n"), "info");
-        }
-        return;
-      }
+      const cmd = argv[0] ?? "show";
 
       if (cmd === "show") {
         const exp = getExpansion(ctx.cwd);
+        const report = buildReport(exp);
         if (!ctx.hasUI || ctx.mode !== "tui") {
-          ctx.ui.notify("show requires the TUI — use list for the text report", "error");
+          ctx.ui.notify(report.join("\n"), "info");
           return;
         }
         const { title, lines } = buildPreviewBlocks(exp);
@@ -981,17 +966,17 @@ export default function rulesExtension(pi: ExtensionAPI): void {
           return;
         }
         if (typeof ctx.ui.custom !== "function") {
-          ctx.ui.notify("Preview unavailable in this UI — use list for the text report", "error");
+          ctx.ui.notify(report.join("\n"), "info");
           return;
         }
         // Lazy runtime import: resolved by pi's jiti alias to pi's bundled
         // pi-tui. In plain-Node tests this import fails and we degrade to
-        // a notify instead of throwing.
+        // the text report instead of throwing.
         let tui: typeof import("@earendil-works/pi-tui");
         try {
           tui = await import("@earendil-works/pi-tui");
         } catch {
-          ctx.ui.notify("Preview unavailable (pi-tui not resolvable) — use list", "error");
+          ctx.ui.notify(report.join("\n"), "info");
           return;
         }
         const { matchesKey, Key, truncateToWidth, visibleWidth } = tui;
@@ -1035,7 +1020,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      ctx.ui.notify(`Unknown subcommand "${cmd}" — use list | show | init | reload`, "error");
+      ctx.ui.notify(`Unknown subcommand "${cmd}" — use show | init | reload`, "error");
     },
   });
 }
