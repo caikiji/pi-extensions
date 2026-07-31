@@ -1,0 +1,99 @@
+<!-- ============================================================
+  RULES.md — user-maintained ground truth for AI agents
+  RULES.md —— 用户维护的恒真规则文件
+
+  This file is authoritative and stable: it changes ONLY when you
+  edit it. Agents must follow it; if a rule conflicts with the
+  code they observe, they should ask you to clarify — never modify
+  this file themselves.
+  本文件权威且稳定：只在你主动修改时变更。Agent 必须遵守；
+  若规则与代码现实冲突，应向用户求证，而不是自行修改本文件。
+
+  Syntax / 语法（示例都在注释内，加载时剥离，不进提示词）：
+    &lt;!-- comment --&gt;                HTML comment; stripped at load
+                                          注释；加载时剥离，不进提示词
+    @import docs/x.md                     import a whole file (path relative to THIS file's directory)
+                                          导入整文件（路径相对本文件所在目录）
+    @import docs/x.md#section             import one heading section (heading line included)
+                                          只导入该标题的 section（含标题行）
+    @import docs/*.md                     glob import: * = one level, ** = recursive, ? = one char
+                                          glob 导入：* 单层、** 递归、? 单字符
+    \@import literal                      escaped: shown literally, not expanded
+                                          转义，原样显示、不展开
+    @rules max_depth 5                    set limits (affects rest of this file + its imports):
+                                          设置参数（影响本文件其余部分及其导入）
+    @rules max_glob_files 50              max_depth / max_glob_files / max_total_bytes (b/kb/mb)
+    @rules max_total_bytes 50kb           defaults: depth 5 · glob 50 files · 50 KB
+                                          默认值：深度 5 · glob 50 个文件 · 总量 50 KB
+    Imported files may import further (cycles detected, files deduped)
+    被导入文件可继续导入（自动防环、按路径去重）
+============================================================ -->
+
+<!-- ===== Decisions & rationale (why, not how) ===== -->
+<!-- ===== 决策与理由（为什么这么做，而不是怎么做） ===== -->
+
+<!-- Example / 示例：
+- Package manager is pnpm: workspace support is more reliable than npm
+- 包管理用 pnpm：workspace 支持比 npm 更稳
+-->
+
+<!-- ===== Constraints & traps (not visible in the code) ===== -->
+<!-- ===== 约束与陷阱（代码里看不出来的红线） ===== -->
+
+<!-- Example / 示例：
+- dist/ is generated output; never edit it by hand
+- dist/ 是构建产物，永远不要手改
+-->
+
+<!-- ===== Intent (layout changes, intent does not) ===== -->
+<!-- ===== 意图（布局会变，意图不会） ===== -->
+
+<!-- Example / 示例：
+- This repo's end goal is to be split into independent npm packages
+- 本仓库的最终目标是拆成独立 npm 包
+-->
+
+<!-- ===== Imports (stable pointers to curated documents) ===== -->
+<!-- ===== 导入（指向你选定维护的文档的稳定指针） ===== -->
+
+<!-- Example / 示例：
+@import docs/conventions.md
+@import docs/architecture.md#data-flow
+@import docs/patterns/*.md
+-->
+
+<!-- ============================================================
+  以下是本项目的实际规则（注释以上是语法速查）
+  Actual rules below — the comments above are the syntax cheat-sheet
+============================================================ -->
+
+## 决策与理由 (why, not how)
+
+- 扩展用零依赖单文件 TS：pi 用 jiti 加载扩展，第三方包在 git package 里解析脆弱——所以 getAgentDir 是本地实现，不 import pi 运行时
+- 代码注释用英文，用户文档（模板/README）可双语：注释是给代码看的，文档是给人看的
+- 测试放 tests/*.test.mjs，用 Node ≥22.18 原生类型剥离直接 import .ts：零 npm install 就能跑
+- 新增扩展必须同时注册到 package.json 的 pi.extensions 和 README 表格
+
+## 约束与陷阱 (not visible in the code)
+
+- 扩展代码只用 erasable TS 语法（无 enum / namespace / 构造器参数属性）——否则 tests 直接 import .ts 会崩
+- 改了 rules.ts 必须跑 `npm test`（56 断言，覆盖注释剥离/导入/防环/@rules/缓存）
+- 模板头注释内禁止出现字面 <!-- -->（CommonMark 在第一个 --> 截断，会泄漏到预览）——示例一律用 &lt;!-- 实体
+- 不要把 tests/.work 提交进 git
+
+- .pi/settings.json 是本仓库的自引用配置（打开项目自动加载 extensions/ 全部扩展），勿删；新增扩展放进 extensions/ 目录即自动生效，同时注册到 package.json 的 pi.extensions
+
+## 意图 (layout changes, intent does not)
+
+- 保持"clone 即跑"：无构建步骤、无 npm install、任何机器可测
+- 每个扩展解决一个具体痛点，不过度设计
+- 本仓库是个人工具，但代码质量按开源标准
+
+## 提交规范 (commit style)
+
+- 提交信息一律英文（summary 和 body 都是）
+- 格式：`type(scope): summary`，如 `feat(rules): add @rules directive`
+- type 只用：feat / fix / refactor / docs / test / chore / style
+- summary 用祈使句（Add / Fix / Update / Remove...），不超过 72 字符
+- 一个提交只做一件事；`npm test` 通过后才提交
+- 不提交 tests/.work、node_modules 等运行时产物

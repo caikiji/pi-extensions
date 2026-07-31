@@ -1,12 +1,20 @@
 {
   "name": "pi-extensions",
-  "version": "0.0.1",
-  "description": "Personal pi extension: handoff",
+  "version": "0.0.2",
+  "description": "Personal pi extensions: handoff, rules",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
+  "scripts": {
+    "test": "node tests/run-all.mjs"
+  },
   "pi": {
-    "extensions": ["./extensions/handoff.ts"]
+    "extensions": [
+      "./extensions/handoff.ts",
+      "./extensions/rules.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
