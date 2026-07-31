@@ -799,20 +799,38 @@ interface PreviewKeys {
  * Flatten expanded sources into one window: a header line per source plus
  * its expanded content. Empty when no RULES.md exists.
  */
-export function buildPreviewBlocks(exp: Expansion | undefined): { title: string; lines: string[] } {
-  if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", lines: [] };
-  // Report first (what /rules list used to show), then the expanded content.
-  const lines: string[] = buildReport(exp);
-  lines.push("");
+export type PreviewStyle = "dim" | "muted" | "plain";
+
+export interface PreviewSegment {
+  style: PreviewStyle;
+  lines: string[];
+}
+
+/**
+ * Build the window content as styled segments: the report first (dim),
+ * then per source a muted header line followed by plain expanded content.
+ * The "Rules: …" stats line is dropped — the window title already carries it.
+ * Empty when no RULES.md exists.
+ */
+export function buildPreviewBlocks(exp: Expansion | undefined): { title: string; segments: PreviewSegment[] } {
+  if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", segments: [] };
+  const report = buildReport(exp); // first line duplicates the title → skip it
+  const segments: PreviewSegment[] = [
+    { style: "dim", lines: report.slice(1) },
+    { style: "dim", lines: [""] },
+  ];
   for (const s of exp.sources) {
     const impNote = s.imports.length > 0 ? ` · ${s.imports.length} import(s)` : "";
-    lines.push(`─ [${s.kind}] ${s.path} — ${s.lines} lines · expanded ${fmtBytes(s.bytes)}${impNote}`);
-    lines.push(...s.content.split("\n"));
-    lines.push("");
+    segments.push({
+      style: "muted",
+      lines: [`─ [${s.kind}] ${s.path} — ${s.lines} lines · expanded ${fmtBytes(s.bytes)}${impNote}`],
+    });
+    segments.push({ style: "plain", lines: s.content.split("\n") });
+    segments.push({ style: "plain", lines: [""] });
   }
   return {
     title: `RULES.md (expanded) — ${exp.sources.length} file(s) · ${fmtBytes(exp.totalBytes)} · ~${Math.round(exp.totalBytes / 4)} tokens`,
-    lines,
+    segments,
   };
 }
 
@@ -827,13 +845,26 @@ export function makePreviewWindow(
   theme: Theme,
   done: PreviewDone,
   title: string,
-  lines: string[],
+  segments: PreviewSegment[],
   truncate: PreviewTruncate,
   visibleWidth: (text: string) => number,
   matchesKey: PreviewMatchesKey,
   keys: PreviewKeys,
   fullScreen: boolean,
 ): { render: (width: number) => string[]; handleInput: (data: string) => void; invalidate: () => void } {
+  // Flatten segments into lines plus a per-line style so scrolling stays index-based.
+  const flat: string[] = [];
+  const flatStyle: PreviewStyle[] = [];
+  for (const seg of segments) {
+    for (const line of seg.lines) {
+      flat.push(line);
+      flatStyle.push(seg.style);
+    }
+  }
+  const styleLine = (i: number, text: string): string => {
+    const s = flatStyle[i] ?? "plain";
+    return s === "dim" ? theme.fg("dim", text) : s === "muted" ? theme.fg("muted", text) : text;
+  };
   const contentHeight = () => {
     const rows = tui.terminal.rows;
     // full-screen: rough editor-area estimate; overlay: keep under maxHeight.
@@ -842,7 +873,7 @@ export function makePreviewWindow(
   };
   let offset = 0;
   const clamp = () => {
-    const max = Math.max(0, lines.length - contentHeight());
+    const max = Math.max(0, flat.length - contentHeight());
     if (offset > max) offset = max;
     if (offset < 0) offset = 0;
   };
@@ -866,14 +897,14 @@ export function makePreviewWindow(
       const inner = Math.max(1, width - 2);
       const out: string[] = [topBorder(width)];
       const bar = theme.fg("dim", "│");
-      for (let i = offset; i < offset + h && i < lines.length; i++) {
-        out.push(`${bar}${truncate(lines[i] ?? "", inner, "", true)}${bar}`);
+      for (let i = offset; i < offset + h && i < flat.length; i++) {
+        out.push(`${bar}${truncate(styleLine(i, flat[i] ?? ""), inner, "", true)}${bar}`);
       }
       while (out.length < h + 1) out.push(`${bar}${' '.repeat(inner)}${bar}`);
       const first = offset + 1;
-      const last = Math.min(offset + h, lines.length);
-      const pct = lines.length > 0 ? Math.round((offset / Math.max(1, lines.length - h)) * 100) : 0;
-      out.push(bottomBorder(` ${first}–${last} / ${lines.length} (${pct}%) · ↑↓ PgUp/PgDn Home/End · Esc `, width));
+      const last = Math.min(offset + h, flat.length);
+      const pct = flat.length > 0 ? Math.round((offset / Math.max(1, flat.length - h)) * 100) : 0;
+      out.push(bottomBorder(` ${first}–${last} / ${flat.length} (${pct}%) · ↑↓ PgUp/PgDn Home/End · Esc `, width));
       return out;
     },
     handleInput(data: string): void {
@@ -911,7 +942,7 @@ export function makePreviewWindow(
         return;
       }
       if (matchesKey(data, keys.end)) {
-        offset = lines.length;
+        offset = flat.length;
         clamp();
         tui.requestRender();
         return;
@@ -960,8 +991,8 @@ export default function rulesExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(report.join("\n"), "info");
           return;
         }
-        const { title, lines } = buildPreviewBlocks(exp);
-        if (lines.length === 0) {
+        const { title, segments } = buildPreviewBlocks(exp);
+        if (segments.length === 0) {
           ctx.ui.notify("No RULES.md found — run /rules init to create a template", "error");
           return;
         }
@@ -992,7 +1023,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         const fullScreen = argv.includes("full");
         await ctx.ui.custom(
           (tuiInstance, theme, _kb, done) =>
-            makePreviewWindow(tuiInstance, theme, done, title, lines, truncateToWidth, visibleWidth, matchesKey, keys, fullScreen),
+            makePreviewWindow(tuiInstance, theme, done, title, segments, truncateToWidth, visibleWidth, matchesKey, keys, fullScreen),
           fullScreen
             ? undefined
             : { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", margin: 2 } },

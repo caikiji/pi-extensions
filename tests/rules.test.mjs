@@ -263,24 +263,30 @@ console.log("Test 12: @rules in imported files affects only their subtree");
     fileStats: new Map(),
   };
   const blocks = mod.buildPreviewBlocks(fakeExp);
-  const all = blocks.lines.join("\n");
+  const all = blocks.segments.flatMap((s) => s.lines).join("\n");
   assert(blocks.title.includes("2 file(s) · 40 B · ~10 tokens"), "preview title shows stats");
-  // report section first (what list used to show)
-  assert(blocks.lines[0].startsWith("Rules: 2 file(s)"), "report leads the window");
-  assert(all.includes("limits: depth 2 · glob ≤ 1 files · total ≤ 100 B · overridden in RULES.md"), "limits line in report");
+  // report segment first (dim), without the duplicate "Rules:" stats line
+  const reportSeg = blocks.segments[0];
+  assert(reportSeg.style === "dim", "report segment styled dim");
+  assert(!all.includes("Rules: 2 file(s)"), "stats line dropped (title carries it)");
+  assert(reportSeg.lines[0].startsWith("limits:"), "report leads with limits");
   assert(all.includes("✓ @import docs/x.md — whole file · 22 B"), "import status in report");
   assert(all.includes("Settings (from RULES.md):") && all.includes("⚙ max_depth = 2 (RULES.md)"), "settings in report");
   assert(all.includes("Diagnostics:") && all.includes('unknown @rules key "bogus"'), "diagnostics in report");
-  assert(all.includes("1 error(s) · 0 warning(s)") || all.includes("0 error(s) · 1 warning(s)"), "summary line present");
-  // then the content section
-  assert(all.includes("─ [global] ~/agent-dir/RULES.md — 3 lines · expanded 9 B"), "content header line present");
-  assert(blocks.lines.includes("- global rule"), "global content shown");
-  assert(blocks.lines.includes("@import expanded"), "expanded content shown (imports inlined)");
-  assert(blocks.lines.some((l) => l.includes("1 import(s)")), "import count noted");
-  assert(mod.buildPreviewBlocks(undefined).lines.length === 0, "no rules → empty blocks");
+  assert(all.includes("0 error(s) · 1 warning(s)"), "summary line present");
+  // content segments: muted header + plain content
+  const muted = blocks.segments.filter((s) => s.style === "muted");
+  assert(muted.length === 2 && muted.every((s) => s.lines.length === 1), "one muted header per source");
+  assert(muted[0].lines[0].includes("─ [global] ~/agent-dir/RULES.md — 3 lines · expanded 9 B"), "content header line present");
+  const plain = blocks.segments.filter((s) => s.style === "plain");
+  assert(plain.some((s) => s.lines.includes("- global rule")), "global content shown");
+  assert(plain.some((s) => s.lines.includes("@import expanded")), "expanded content shown (imports inlined)");
+  assert(all.includes("1 import(s)"), "import count noted");
+  assert(mod.buildPreviewBlocks(undefined).segments.length === 0, "no rules → empty blocks");
 
-  // makePreviewWindow: borders, scrolling, clamp, close
-  const fakeTheme = { fg: (_name, s) => s };
+  // makePreviewWindow: styled segments, borders, scrolling, clamp, close
+  const fgCalls = [];
+  const fakeTheme = { fg: (name, s) => { fgCalls.push(name); return s; } };
   const fakeTruncate = (t, w) => t.slice(0, w);
   const fakeVW = (t) => t.length;
   const fakeMK = (data, key) => data === key;
@@ -289,23 +295,31 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   let doneCalled = false;
   const tui = { terminal: { rows: 40 }, requestRender: () => { renders++; } };
   const wlines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
-  const win = mod.makePreviewWindow(tui, fakeTheme, () => { doneCalled = true; }, "T", wlines, fakeTruncate, fakeVW, fakeMK, keys, false);
+  const segs = [
+    { style: "dim", lines: ["meta 1", "meta 2"] },
+    { style: "muted", lines: ["─ header"] },
+    { style: "plain", lines: wlines },
+  ];
+  const win = mod.makePreviewWindow(tui, fakeTheme, () => { doneCalled = true; }, "T", segs, fakeTruncate, fakeVW, fakeMK, keys, false);
   const out = win.render(60);
   assert(out[0].startsWith("┌─") && out[0].endsWith("┐"), "top border with title");
   assert(out[out.length - 1].startsWith("└─") && out[out.length - 1].endsWith("┘"), "bottom border with status");
   assert(out[1].startsWith("│") && out[1].endsWith("│"), "content rows bordered");
-  assert(out[1].includes("line 0"), "first content line shown");
+  assert(out[1].includes("meta 1"), "first line is the report segment");
+  assert(out[3].includes("─ header"), "muted header rendered");
+  assert(out[4].includes("line 0"), "first content line shown");
   assert(out.length === 32, "window height = contentHeight + 2 borders (30+2)");
+  assert(fgCalls.includes("dim") && fgCalls.includes("muted") && fgCalls.includes("accent"), "dim/muted/accent styles applied");
 
   win.handleInput("down");
   assert(renders === 1, "scroll triggers requestRender");
-  assert(win.render(60)[1].includes("line 1"), "down scrolls one line");
+  assert(win.render(60)[4].includes("line 1"), "down scrolls one line");
   win.handleInput("end");
-  assert(win.render(60)[1].includes("line 20"), "end clamps to last viewport");
+  assert(win.render(60)[4].includes("line 23"), "end clamps to last viewport (53-30)");
   win.handleInput("home");
-  assert(win.render(60)[1].includes("line 0"), "home jumps to top");
+  assert(win.render(60)[4].includes("line 0"), "home jumps to top");
   win.handleInput("up");
-  assert(win.render(60)[1].includes("line 0"), "up at top clamps");
+  assert(win.render(60)[4].includes("line 0"), "up at top clamps");
   win.handleInput("escape");
   assert(doneCalled, "escape closes window");
 
