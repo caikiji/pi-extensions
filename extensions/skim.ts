@@ -95,7 +95,9 @@ function tsPatterns(): LangPatterns {
 		methodBlacklist: METHOD_BLACKLIST,
 		nameOf: (m) => m[1],
 		kindOf: (m, line) => {
-			const kw = line.replace(/^(?:export|default|declare|abstract|async)\s+/g, "").trim().split(/\s+/)[0];
+			// Strip every leading modifier (export default async ...) so the first
+			// remaining keyword decides the kind.
+			const kw = line.trim().replace(/^(?:(?:export|default|declare|abstract|async)\s+)+/, "").split(/\s+/)[0];
 			if (kw === "function") return "function";
 			if (kw === "class") return "class";
 			if (kw === "interface") return "interface";
@@ -239,7 +241,27 @@ function patternsFor(lang: string): LangPatterns | undefined {
 
 // ============================================================================
 // Scanner: string/comment-aware brace balancing
-// ============================================================================
+// Regex-literal skip: `/.../` at expression position, handling escapes and [classes].
+function skipRegexLiteral(line: string, j: number): number {
+	if (line[j] !== "/") return -1;
+	// A `/` preceded by an identifier/quote/close-bracket is division, not a regex.
+	let k = j - 1;
+	while (k >= 0 && /\s/.test(line[k])) k--;
+	if (k >= 0 && /[A-Za-z0-9_$)\]}"'`]/.test(line[k])) return -1;
+	let inClass = false;
+	for (let i = j + 1; i < line.length; i++) {
+		const c = line[i];
+		if (c === "\\") { i++; continue; }
+		if (c === "[") inClass = true;
+		else if (c === "]") inClass = false;
+		else if (c === "/" && !inClass) {
+			let e = i + 1;
+			while (e < line.length && /[a-z]/i.test(line[e])) e++; // flags
+			return e;
+		}
+	}
+	return -1; // unterminated on this line: treat as division, do not skip
+}
 
 function scanBalanced(lines: string[], start: number, open: string, close: string, colStart = 0): number {
 	let depth = 0;
@@ -281,6 +303,13 @@ function scanBalanced(lines: string[], start: number, open: string, close: strin
 				strCh = c;
 				j++;
 				continue;
+			}
+			if (c === "/") {
+				const reEnd = skipRegexLiteral(line, j);
+				if (reEnd !== -1) {
+					j = reEnd;
+					continue;
+				}
 			}
 			if (c === open) depth++;
 			else if (c === close) {
@@ -339,6 +368,13 @@ function findBodyBrace(lines: string[], start: number, maxScan: number): { line:
 				strCh = c;
 				j++;
 				continue;
+			}
+			if (c === "/") {
+				const reEnd = skipRegexLiteral(line, j);
+				if (reEnd !== -1) {
+					j = reEnd;
+					continue;
+				}
 			}
 			if (c === "{") candidates.push({ line: i, col: j });
 			j++;
@@ -459,7 +495,9 @@ function docBlockAbove(lines: string[], lineIdx: number): string | undefined {
 			continue;
 		}
 		if (t.startsWith("*")) {
-			collected.unshift(t.replace(/^\*\s*/, ""));
+			const inner = t.replace(/^\*\s*/, "");
+			// A bare `*/` (or `*`) line must not leak a "/" description.
+			if (!/^[/*]*$/.test(inner)) collected.unshift(inner);
 			i--;
 			continue;
 		}
@@ -787,11 +825,11 @@ export function isBinary(buf: Buffer): boolean {
 export function skimFile(file: string): SkimFile {
 	const st = statSync(file);
 	if (st.size > MAX_FILE_BYTES) {
-		throw new Error(`file too large for skim (${st.size} bytes > 1 MB) — use read instead`);
+		throw new Error(`file too large for skim (${st.size} bytes > 1 MB): use read instead`);
 	}
 	const buf = readFileSync(file);
 	if (isBinary(buf)) {
-		throw new Error(`binary file — skim only handles text`);
+		throw new Error(`binary file: skim only handles text`);
 	}
 	const text = buf.toString("utf8").replace(/\r\n/g, "\n");
 	const lines = text.split("\n");
@@ -1022,7 +1060,7 @@ export function fmtBytes(n: number): string {
 
 function truncate(s: string, max: number): string {
 	if (s.length <= max) return s;
-	return s.slice(0, max - 1) + "…";
+	return s.slice(0, max - 1) + "...";
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -1050,32 +1088,32 @@ export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: nu
 	const truncated = syms.length > limit;
 	const shown = truncated ? syms.slice(0, limit) : syms;
 
-	const header = `${basename(file.path)} (${file.lines} 行 · ${fmtBytes(file.bytes)} · ~${estimateTokens(file.bytes)} tok · ${shown.length} symbol${shown.length === 1 ? "" : "s"})`;
+	const header = `${basename(file.path)} (${file.lines} lines | ${fmtBytes(file.bytes)} | ~${estimateTokens(file.bytes)} tok | ${shown.length} symbol${shown.length === 1 ? "" : "s"})`;
 	const rows = shown.map((s) => {
 		const label = KIND_LABEL[s.kind] ?? s.kind;
-		const prefix = s.depth === 0 ? "├─ " : `${"  ".repeat(s.depth)}├─ `;
-		const span = s.endLine > s.line ? ` (${s.endLine - s.line + 1} 行)` : "";
+		const prefix = s.depth === 0 ? "|- " : `${"  ".repeat(s.depth)}|- `;
+		const span = s.endLine > s.line ? ` (${s.endLine - s.line + 1} lines)` : "";
 		let row = `${prefix}${label} ${truncate(s.name, nameMax)} @${s.line}${span}`;
-		if (s.desc) row += ` — ${truncate(s.desc, descMax)}`;
+		if (s.desc) row += ` - ${truncate(s.desc, descMax)}`;
 		return row;
 	});
-	const tail = truncated ? `\n… +${syms.length - limit} more symbols (use --filter or --full)` : "";
+	const tail = truncated ? `\n... +${syms.length - limit} more symbols (use --filter or --full)` : "";
 	return [header, ...rows].join("\n") + tail;
 }
 
 export function formatRead(file: SkimFile, result: ReadResult): string {
-	const label = result.name ? `· ${result.name}` : "";
-	const note = result.note ? ` · ${result.note}` : "";
+	const label = result.name ? `- ${result.name}` : "";
+	const note = result.note ? ` - ${result.note}` : "";
 	return `${basename(file.path)}:${result.line}-${result.endLine}${label}${note}\n${result.text}`;
 }
 
 export function formatDir(dir: SkimDir): string {
-	const header = `${basename(dir.path) || dir.path} (${dir.total} 项${dir.skipped > 0 ? ` · ${dir.skipped} skipped` : ""}${dir.truncated ? " · truncated" : ""})`;
+	const header = `${basename(dir.path) || dir.path} (${dir.total} entries${dir.skipped > 0 ? ` | ${dir.skipped} skipped` : ""}${dir.truncated ? " | truncated" : ""})`;
 	const rows = dir.entries.map((e) => {
 		const mark = e.entry ? "* " : "  ";
 		const size = fmtBytes(e.bytes);
-		const lines = e.lines > 0 ? ` · ${e.lines} 行` : "";
-		const first = e.first ? ` — ${e.first}` : "";
+		const lines = e.lines > 0 ? ` | ${e.lines} lines` : "";
+		const first = e.first ? ` - ${e.first}` : "";
 		return `${mark}${e.path} (${size}${lines})${first}`;
 	});
 	return [header, ...rows].join("\n");
@@ -1222,7 +1260,7 @@ export async function runSkim(params: SkimParams, cwd: string): Promise<string> 
 		const matches = expandGlob(p, cwd);
 		if (matches.length === 0) return `no files match: ${p}`;
 		if (matches.length > 20) {
-			return `too many matches (${matches.length}) — narrow the glob`;
+			return `too many matches (${matches.length}): narrow the glob`;
 		}
 		const parts: string[] = [];
 		for (const m of matches) {
@@ -1247,7 +1285,7 @@ export async function runSkim(params: SkimParams, cwd: string): Promise<string> 
 		const lines = text.split("\n");
 		if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 		const result = readSymbol(lines, file.lang, params.read);
-		if (!result) return `symbol not found: ${params.read} (file has ${file.symbols.length} symbols — run skim without --read for the outline)`;
+		if (!result) return `symbol not found: ${params.read} (file has ${file.symbols.length} symbols - run skim without --read for the outline)`;
 		return formatRead(file, result);
 	}
 	if (params.json) return JSON.stringify(file);

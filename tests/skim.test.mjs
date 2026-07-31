@@ -251,6 +251,32 @@ console.log("Test 9: extension registers tool + command");
 	assert(notified.length === 1 && notified[0].includes("Usage"), "empty args shows usage");
 }
 
+// ================= Test 10: regex literals, ascii output, kinds =================
+console.log("Test 10: regex literals do not break spans; output is pure ASCII");
+{
+	const src = [
+		"/** Doc with regexes. */",
+		"function rex() {",
+		'  const a = /\\d{2}/;',
+		'  const b = /[{}\\[\\]]+/;',
+		'  const c = /"quoted"/g;',
+		'  if (a.test("x")) return { ok: true };',
+		"}",
+		"",
+		"export default async function named() {",
+		"  return 1;",
+		"}",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const byName = Object.fromEntries(syms.map((s) => [s.name, s]));
+	assert(byName["rex"]?.endLine === 7, `regex literals do not break spans (rex ends at 7, got ${byName["rex"]?.endLine})`);
+	assert(byName["named"]?.kind === "function", "export default async function -> kind function");
+	assert(byName["rex"].desc === "Doc with regexes.", "docblock desc not polluted by closing */");
+	const outline = mod.formatOutline({ path: "f.ts", lang: "ts", lines: src.length, bytes: 200, symbols: syms }, {});
+	assert(!/[^\x00-\x7F]/.test(outline), "outline output is pure ASCII");
+	assert(outline.includes("lines |") && !outline.includes("行"), "English units in header");
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
