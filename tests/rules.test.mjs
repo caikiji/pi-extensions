@@ -30,6 +30,8 @@ function assert(cond, msg) {
 }
 
 const TMP = join(fileURLToPath(new URL(".", import.meta.url)), ".work");
+// rules.ts displays paths under $HOME as ~/... — mirror that for source-slice offsets
+const disp = (p) => p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p;
 rmSync(TMP, { recursive: true, force: true });
 mkdirSync(join(TMP, "docs/patterns"), { recursive: true });
 mkdirSync(join(TMP, "docs/nested/deep"), { recursive: true });
@@ -73,7 +75,7 @@ console.log("Test 2: /rules init creates template; expansion strips all comments
   assert(!g.includes("@import docs/"), "template's example imports not expanded");
   assert(!g.includes("Syntax:"), "syntax cheat-sheet not in prompt");
   assert(g.includes("<rules_source path="), "source block present");
-  const content = g.slice(g.indexOf("<rules_source") + `<rules_source path="${TMP}/RULES.md">`.length, g.indexOf("</rules_source>"));
+  const content = g.slice(g.indexOf("<rules_source") + `<rules_source path="${disp(TMP)}/RULES.md">`.length, g.indexOf("</rules_source>"));
   assert(!content.includes("Example"), "example comments stripped");
 }
 
@@ -131,6 +133,10 @@ console.log("Test 3: whole-file, section, glob, nested, escape, missing");
   assert(g.includes("glob matched no files"), "empty glob marked");
   assert(!g.includes("[rules] skipped: docs/inside-fence.md"), "import inside code fence not expanded");
 
+  // stripped comments leave blank lines behind; they must be trimmed at the edges
+  const srcContent = g.slice(g.indexOf("<rules_source") + `<rules_source path="${disp(TMP)}/RULES.md">`.length, g.indexOf("</rules_source>")).trim();
+  assert(srcContent.startsWith("# My Rules"), "leading blank lines trimmed");
+  assert(srcContent.endsWith("- split into packages"), "trailing blank lines trimmed");
   // list report
   const widget = { lines: null };
   const ui = { notify: () => {}, setWidget: (k, v) => { widget.lines = v; } };

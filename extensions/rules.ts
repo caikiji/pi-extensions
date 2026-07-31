@@ -691,7 +691,9 @@ function computeExpansion(cwd: string): Expansion {
       imports,
       diagnostics,
     );
-    const content = out.join("\n");
+    // Trim leading/trailing blank lines left behind by stripped comments
+    // (a removed <!-- ... --> line still leaves its newline).
+    const content = out.join("\n").trim();
     const lines = raw.split(/\r?\n/).length;
     sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, content, imports });
     blocks.push(`<rules_source path="${displayPath(c.path)}">\n${content}\n</rules_source>`);
