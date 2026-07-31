@@ -10,9 +10,17 @@
  *   /handoff check other places that need this fix
  *
  * The generated prompt appears as a draft in the editor for review/editing.
+ *
+ * Based on the official pi example (examples/extensions/handoff.ts, v0.83.0).
+ * Personal divergences:
+ *   1. One-off generation calls use cacheRetention "none" + a fresh sessionId,
+ *      so they neither read nor pollute the session's provider prompt cache.
+ *   2. The generated prompt follows the language of the goal text.
+ *   3. Generation failures notify the reason instead of showing "Cancelled".
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { uuidv7 } from "@earendil-works/pi-ai";
 import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
@@ -25,6 +33,7 @@ const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversatio
 4. Is self-contained - the new thread should be able to proceed without the old conversation
 
 Format your response as a prompt the user can send to start the new thread. Be concise but include all necessary context. Do not include any preamble like "Here's the prompt" - just output the prompt itself.
+Write the prompt in the same language as the user's goal text.
 
 Example output format:
 ## Context
@@ -111,7 +120,9 @@ export default function (pi: ExtensionAPI) {
 			const conversationText = serializeConversation(llmMessages);
 			const currentSessionFile = ctx.sessionManager.getSessionFile();
 
-			// Generate the handoff prompt with loader UI
+			// Generate the handoff prompt with loader UI. Track failures so the
+			// user can distinguish a real error from a manual cancel.
+			let generationError: string | undefined;
 			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 				const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
 				loader.onAbort = () => done(null);
@@ -136,7 +147,14 @@ export default function (pi: ExtensionAPI) {
 					const response = await complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
+						{
+							apiKey: auth.apiKey,
+							headers: auth.headers,
+							env: auth.env,
+							signal: loader.signal,
+							cacheRetention: "none",
+							sessionId: uuidv7(),
+						},
 					);
 
 					if (response.stopReason === "aborted") {
@@ -153,6 +171,7 @@ export default function (pi: ExtensionAPI) {
 					.then(done)
 					.catch((err) => {
 						console.error("Handoff generation failed:", err);
+						generationError = err instanceof Error ? err.message : String(err);
 						done(null);
 					});
 
@@ -160,7 +179,11 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			if (result === null) {
-				ctx.ui.notify("Cancelled", "info");
+				if (generationError) {
+					ctx.ui.notify(`Handoff generation failed: ${generationError}`, "error");
+				} else {
+					ctx.ui.notify("Cancelled", "info");
+				}
 				return;
 			}
 
