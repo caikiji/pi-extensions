@@ -24,7 +24,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ============================================================================
@@ -246,11 +246,12 @@ export async function restoreCheckpoint(
 	opts: { force?: boolean } = {},
 ): Promise<RestoreResult> {
 	const gitDir = await getGitDir(exec, cwd);
-	if (!gitDir) return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: "not a git repository" };
+	if (!gitDir) return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` };
 
 	const state = loadState(gitDir);
 	let entry: CheckpointEntry | undefined;
-	if (idOrLatest === "latest") entry = state.entries[0];
+	// 'latest' skips pre-restore snapshots (internal restore side-effects).
+	if (idOrLatest === "latest") entry = state.entries.find((e) => !e.msg.startsWith("pre-restore"));
 	else entry = state.entries.find((e) => e.id === idOrLatest || e.id.startsWith(idOrLatest));
 	if (!entry) {
 		const ids = state.entries.slice(0, 8).map((e) => e.id).join(", ");
@@ -307,6 +308,14 @@ export async function restoreCheckpoint(
 			wouldDelete,
 			error: `${conflicts.length} file(s) changed since the checkpoint - use --force to overwrite them`,
 		};
+	}
+
+	// Save a pre-restore snapshot so the restore itself can be undone.
+	// Best-effort: never block the restore on snapshot failure.
+	try {
+		await createCheckpoint(exec, cwd, `pre-restore ${entry.id}`, false);
+	} catch {
+		// ignore
 	}
 
 	// Apply: tracked files from the snapshot commit.
@@ -386,11 +395,13 @@ export function formatEntries(entries: CheckpointEntry[], full = false): string 
 
 interface CheckpointParams {
 	json?: boolean;
+	repo?: string; // repo dir (relative to cwd or absolute) when the session cwd is outside the repo
 }
 
 interface RestoreParams {
 	id: string;
 	force?: boolean;
+	repo?: string; // repo dir (relative to cwd or absolute) when the session cwd is outside the repo
 }
 
 export default async function checkpointExtension(pi: ExtensionAPI): Promise<void> {
@@ -398,10 +409,14 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 	let restoreSchema: object | undefined;
 	try {
 		const { Type } = await import("typebox");
-		schema = Type.Object({ json: Type.Optional(Type.Boolean({ description: "Return machine-readable JSON" })) });
+		schema = Type.Object({
+			json: Type.Optional(Type.Boolean({ description: "Return machine-readable JSON" })),
+			repo: Type.Optional(Type.String({ description: "Repo directory (relative to cwd or absolute) - use when the session cwd is outside the repo" })),
+		});
 		restoreSchema = Type.Object({
 			id: Type.String({ description: "Checkpoint id, id prefix, or 'latest'" }),
 			force: Type.Optional(Type.Boolean({ description: "Overwrite files you changed after the checkpoint" })),
+			repo: Type.Optional(Type.String({ description: "Repo directory (relative to cwd or absolute) - use when the session cwd is outside the repo" })),
 		});
 	} catch {
 		// typebox unavailable (plain-Node tests) — pi always has it
@@ -423,7 +438,13 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 		parameters: (schema ?? {}) as never,
 		async execute(_toolCallId, params: CheckpointParams, _signal, _onUpdate, ctx) {
 			try {
-				const entries = await listCheckpoints((cmd, args, opts) => pi.exec(cmd, args, opts), ctx.cwd);
+				const exec = (cmd: string, args: string[], opts?: { cwd?: string }) => pi.exec(cmd, args, opts);
+				const cwd = params.repo ? resolve(ctx.cwd, params.repo) : ctx.cwd;
+				const gitDir = await getGitDir(exec, cwd);
+				if (!gitDir) {
+					return { content: [{ type: "text", text: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` }], details: {}, isError: true };
+				}
+				const entries = await listCheckpoints(exec, cwd);
 				const text = params.json ? JSON.stringify(entries) : formatEntries(entries);
 				return { content: [{ type: "text", text }], details: {} };
 			} catch (err) {
@@ -444,7 +465,9 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 		parameters: (restoreSchema ?? {}) as never,
 		async execute(_toolCallId, params: RestoreParams, _signal, _onUpdate, ctx) {
 			try {
-				const res = await restoreCheckpoint((cmd, args, opts) => pi.exec(cmd, args, opts), ctx.cwd, params.id, { force: params.force });
+				const exec = (cmd: string, args: string[], opts?: { cwd?: string }) => pi.exec(cmd, args, opts);
+				const cwd = params.repo ? resolve(ctx.cwd, params.repo) : ctx.cwd;
+				const res = await restoreCheckpoint(exec, cwd, params.id, { force: params.force });
 				const lines: string[] = [];
 				if (res.error) lines.push(`error: ${res.error}`);
 				if (res.restored.length > 0) lines.push(`restored ${res.restored.length} file(s)`);
@@ -473,7 +496,8 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 			try {
 				if (argv.length === 0 || argv[0] === "list") {
 					const entries = await listCheckpoints(exec, ctx.cwd);
-					ctx.ui.notify(formatEntries(entries, argv.includes("--full") || argv[0] === "list" && argv.includes("--full")), "info");
+					const text = formatEntries(entries, argv.includes("--full"));
+					ctx.ui.notify(entries.length === 0 ? `${text} (cwd: ${ctx.cwd})` : text, "info");
 					return;
 				}
 				if (argv[0] === "drop") {

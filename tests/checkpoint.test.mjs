@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const mod = await import(new URL("../extensions/checkpoint.ts", import.meta.url));
 
@@ -103,7 +104,7 @@ console.log("Test 4: restore reverts captured files only");
 console.log("Test 5: id matching");
 {
 	const entries = await mod.listCheckpoints(exec, TMP);
-	const e = entries[0];
+	const e = entries.find((x) => !x.msg.startsWith("pre-restore")); // skip restore side-effects
 	const res = await mod.restoreCheckpoint(exec, TMP, e.id.slice(0, 10));
 	assert(res.ok, "id prefix matches");
 	const res2 = await mod.restoreCheckpoint(exec, TMP, "latest");
@@ -189,6 +190,27 @@ console.log("Test 10: extension registers tools + commands");
 	assert(badRes.isError === true && badRes.content[0].text.includes("not found"), "unknown id → error result");
 }
 
+// ================= Test 11: repo param, cwd-aware errors, pre-restore =================
+console.log("Test 11: repo param, cwd-aware errors, pre-restore snapshot");
+{
+	// A directory outside any git repo.
+	const OUTSIDE = mkdirSync(join(tmpdir(), "pi-cp-out-" + Date.now()), { recursive: true });
+	const noRepo = await tools["checkpoint_list"].execute("t4", {}, undefined, undefined, { cwd: OUTSIDE });
+	assert(noRepo.isError === true && noRepo.content[0].text.includes("not a git repository"), "non-repo cwd -> cwd-aware error");
+	const withRepo = await tools["checkpoint_list"].execute("t5", { repo: TMP }, undefined, undefined, { cwd: OUTSIDE });
+	assert(withRepo.isError === undefined && withRepo.content[0].text.includes("auto"), "repo param resolves the repo from an outside cwd");
+	const badRes = await tools["checkpoint_restore"].execute("t6", { id: "zzz" }, undefined, undefined, { cwd: OUTSIDE });
+	assert(badRes.isError === true && badRes.content[0].text.includes("not a git repository"), "restore outside repo -> cwd-aware error");
+	// A restore must first snapshot the current state (pre-restore) so it can be undone.
+	writeFileSync(join(TMP, "pre.txt"), "v1");
+	const cp = await mod.createCheckpoint(exec, TMP, "pre test", false);
+	writeFileSync(join(TMP, "pre.txt"), "v2");
+	const res = await mod.restoreCheckpoint(exec, TMP, cp.id, { force: true });
+	assert(res.ok === true && readFileSync(join(TMP, "pre.txt"), "utf8") === "v1", "force restore still works");
+	const all = await mod.listCheckpoints(exec, TMP);
+	assert(all.some((e) => e.msg.startsWith("pre-restore")), "pre-restore snapshot created on restore");
+	rmSync(OUTSIDE, { recursive: true, force: true });
+}
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
