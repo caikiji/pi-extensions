@@ -3,6 +3,7 @@
 // Requires Node >= 22.18 (native TypeScript type stripping) — just run:  node tests/skim.test.mjs
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -357,6 +358,52 @@ console.log("Test 14: confidence — low-confidence outlines flagged, normal fil
 	assert(typeof f.confidence === "string" && f.confidence.includes("low-confidence"), `unknown lang flagged by skimFile (got ${f.confidence})`);
 	const f2 = mod.skimFile(join(TMP, "src", "index.ts"));
 	assert(f2.confidence === "", "normal TS file has empty confidence");
+}
+
+// ================= Test 15: git change annotation =================
+console.log("Test 15: git change annotation — [changed +N/-M] on modified symbols");
+{
+	const G = join(TMP, "gitdemo");
+	mkdirSync(G, { recursive: true });
+	const g = (args) => spawnSync("git", args, { cwd: G, encoding: "utf8" });
+	g(["init", "-q"]);
+	g(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+	const f = join(G, "demo.ts");
+	writeFileSync(f, [
+		"export function alpha(a: string) {",
+		"  const x = { ok: true };",
+		"  return x;",
+		"}",
+		"",
+		"export function beta() {",
+		"  return 2;",
+		"}",
+	].join("\n") + "\n");
+	g(["add", "demo.ts"]);
+	g(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "initial"]);
+	// modify alpha (1 add + 1 delete), leave beta untouched
+	writeFileSync(f, [
+		"export function alpha(a: string) {",
+		"  const x = { ok: false };",
+		"  const y = 1;",
+		"  return x;",
+		"}",
+		"",
+		"export function beta() {",
+		"  return 2;",
+		"}",
+	].join("\n") + "\n");
+	const file = mod.skimFile(f);
+	const ch = mod.gitSymbolChanges(file.symbols, f);
+	const alpha = file.symbols.find((s) => s.name === "alpha");
+	const beta = file.symbols.find((s) => s.name === "beta");
+	const aCh = ch.get(alpha.line);
+	const bCh = ch.get(beta.line);
+	assert(aCh !== undefined && aCh.add === 2 && aCh.del === 1, `alpha changed +2/-1 (got ${JSON.stringify(aCh)})`);
+	assert(bCh === undefined, "beta untouched -> no change");
+	const out = await mod.runSkim({ path: f }, TMP);
+	assert(out.includes("[changed +2/-1]"), "outline renders [changed +2/-1]");
+	assert(out.includes("beta") && !out.includes("[changed]"), "only modified symbols flagged");
 }
 
 rmSync(TMP, { recursive: true, force: true });

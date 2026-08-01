@@ -19,11 +19,14 @@
  * as string content (acceptable approximation). Files > 1 MB are rejected.
  * Unknown extensions fall back to a blank-line chunk outline; low-confidence
  * outlines are flagged in the header so the agent prefers read over trusting
- * a possibly-incomplete symbol list.
+ * a possibly-incomplete symbol list. When the file is inside a git repo,
+ * uncommitted diff lines are counted per symbol and flagged [changed +N/-M]
+ * so reviews start from the modified symbols instead of raw hunks.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, extname, join, parse, relative, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { basename, dirname, extname, join, parse, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 // ============================================================================
@@ -1130,7 +1133,7 @@ const KIND_LABEL: Record<string, string> = {
 	"re-export": "re-export",
 };
 
-export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: number; filter?: string }): string {
+export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: number; filter?: string; changes?: Map<number, { add: number; del: number }> }): string {
 	const full = opts.full ?? false;
 	const limit = opts.limit ?? 150;
 	let filter: RegExp | null = null;
@@ -1157,10 +1160,90 @@ export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: nu
 		const span = s.endLine > s.line ? ` (${s.endLine - s.line + 1} lines)` : "";
 		let row = `${prefix}${label} ${truncate(s.name, nameMax)} @${s.line}${span}`;
 		if (s.desc) row += ` - ${truncate(s.desc, descMax)}`;
+		const ch = opts.changes?.get(s.line);
+		if (ch) {
+			const parts: string[] = [];
+			if (ch.add > 0) parts.push(`+${ch.add}`);
+			if (ch.del > 0) parts.push(`-${ch.del}`);
+			if (parts.length > 0) row += ` [changed ${parts.join("/")}]`;
+		}
 		return row;
 	});
 	const tail = truncated ? `\n... +${syms.length - limit} more symbols (use --filter or --full)` : "";
 	return [header, ...rows].join("\n") + tail;
+}
+
+// ============================================================================
+// Git change annotation (automatic; no parameter needed)
+// ============================================================================
+
+interface SymbolChange { add: number; del: number; }
+
+function bumpChange(map: Map<number, SymbolChange>, line: number, add: number, del: number): void {
+	const cur = map.get(line);
+	if (cur) { cur.add += add; cur.del += del; }
+	else map.set(line, { add, del });
+}
+
+/**
+ * Map symbols to their uncommitted diff line counts (+added/-deleted) by
+ * parsing `git diff HEAD --unified=0` hunks. Returns an empty map when the
+ * file is not in a git repo or has no tracked changes.
+ */
+export function gitSymbolChanges(symbols: SkimSymbol[], file: string): Map<number, SymbolChange> {
+	const out = new Map<number, SymbolChange>();
+	if (symbols.length === 0) return out;
+	let root: string;
+	try {
+		const r = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: dirname(file), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		if (r.status !== 0 || !r.stdout) return out; // not a git repo
+		root = r.stdout.trim();
+	} catch {
+		return out;
+	}
+	const rel = relative(root, file);
+	let diff: string;
+	try {
+		const r = spawnSync("git", ["diff", "HEAD", "--unified=0", "--", rel], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		if (r.status !== 0) throw new Error("diff failed");
+		diff = r.stdout || "";
+	} catch {
+		// No HEAD yet: fall back to staged+unstaged against the index.
+		try {
+			const r = spawnSync("git", ["diff", "--unified=0", "--", rel], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+			if (r.status !== 0) return out;
+			diff = r.stdout || "";
+		} catch {
+			return out;
+		}
+	}
+	if (!diff.trim()) return out;
+	const diffLines = diff.split("\n");
+	let newLine = 0;
+	let inHunk = false;
+	for (const line of diffLines) {
+		const hm = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+		if (hm) {
+			newLine = parseInt(hm[1], 10);
+			inHunk = true;
+			continue;
+		}
+		if (!inHunk) continue;
+		const c = line[0];
+		if (c === "+") {
+			const sym = symbols.find((s) => newLine >= s.line && newLine <= s.endLine);
+			if (sym) bumpChange(out, sym.line, 1, 0);
+			newLine++;
+		} else if (c === "-") {
+			// Deleted lines map to the current new-file position.
+			const sym = symbols.find((s) => newLine >= s.line && newLine <= s.endLine);
+			if (sym) bumpChange(out, sym.line, 0, 1);
+		} else if (c === " ") {
+			newLine++;
+		}
+		// "\\ No newline at end of file" and diff headers are ignored.
+	}
+	return out;
 }
 
 export function formatRead(file: SkimFile, result: ReadResult): string {
@@ -1352,7 +1435,8 @@ export async function runSkim(params: SkimParams, cwd: string): Promise<string> 
 		return formatRead(file, result);
 	}
 	if (params.json) return JSON.stringify(file);
-	return formatOutline(file, { full: params.full, limit: params.limit, filter: params.filter });
+	const changes = gitSymbolChanges(file.symbols, path);
+	return formatOutline(file, { full: params.full, limit: params.limit, filter: params.filter, changes });
 }
 
 export default async function skimExtension(pi: ExtensionAPI): Promise<void> {
@@ -1376,7 +1460,7 @@ export default async function skimExtension(pi: ExtensionAPI): Promise<void> {
 		name: "skim",
 		label: "Skim",
 		description:
-			"Get a compact outline of a file (symbols with line numbers, line spans, and one-line descriptions), read a symbol's body directly (--read), or map a directory. Use before reading whole files to save context. Equivalent of a table of contents for code.",
+			"Get a compact outline of a file (symbols with line numbers, line spans, and one-line descriptions; git-changed symbols are flagged [changed]), read a symbol's body directly (--read), or map a directory. Use before reading whole files to save context. Equivalent of a table of contents for code.",
 		parameters: (schema ?? {}) as never,
 		async execute(_toolCallId, params: SkimParams, _signal, _onUpdate, ctx) {
 			try {
