@@ -21,6 +21,8 @@ const {
 	deleteDraft,
 	parseHandoffArgs,
 	goalLine,
+	sanitizeTitle,
+	parseTitle,
 	formatCreated,
 	draftsDir,
 	showDraftPicker,
@@ -36,17 +38,18 @@ const WORK = join(fileURLToPath(new URL(".", import.meta.url)), ".work", "handof
 rmSync(WORK, { recursive: true, force: true });
 mkdirSync(WORK, { recursive: true });
 
-const META = { name: "x.md", goal: "fix the test suite", created: "2026-01-15T14:30:00.000Z", source: "s1.md", model: "m1" };
+const META = { name: "x.md", goal: "fix the test suite", title: "Fix the failing tests", created: "2026-01-15T14:30:00.000Z", source: "s1.md", model: "m1" };
 const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 
 // --- front matter -----------------------------------------------------------
 
 {
 	const text = serializeFrontMatter(META, CONTENT);
-	assert(text.startsWith("---\ngoal: fix the test suite\n"), "front matter header written");
+	assert(text.startsWith("---\ngoal: fix the test suite\ntitle: Fix the failing tests\n"), "front matter header written");
 	assert(text.endsWith(CONTENT), "content appended after front matter");
 	const { meta, content } = parseFrontMatter(text);
 	assert(meta.goal === "fix the test suite", "goal round-trips");
+	assert(meta.title === "Fix the failing tests", "title round-trips");
 	assert(meta.created === "2026-01-15T14:30:00.000Z", "created round-trips");
 	assert(meta.source === "s1.md", "source round-trips");
 	assert(meta.model === "m1", "model round-trips");
@@ -101,6 +104,17 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 }
 
 {
+	// a draft saved before the title feature must still load (title empty)
+	const legacyDir = join(WORK, "legacy");
+	mkdirSync(join(legacyDir, ".pi", "handoffs"), { recursive: true });
+	writeFileSync(
+		join(legacyDir, ".pi", "handoffs", "legacy.md"),
+		"---\ngoal: old goal\ncreated: 2026-01-01T00:00:00.000Z\nsource: s\nmodel: m\n---\ncontent",
+	);
+	const d = readDraft(legacyDir, "legacy.md");
+	assert(d !== null && d.meta.title === "", "legacy draft loads with empty title");
+}
+{
 	assert(readDraft(WORK, "../escape.md") === null, "path traversal names are rejected");
 	assert(readDraft(WORK, "missing.md") === null, "missing draft returns null");
 }
@@ -152,13 +166,42 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(formatCreated("") === "", "formatCreated empty stays empty");
 }
 
+// --- parseTitle (session title from the model's closing line) -----------------
+
+{
+	const { title, body } = parseTitle("## Context\nwork\n## Task\ndo it\n\nTitle: Fix the failing tests\n", "fallback");
+	assert(title === "Fix the failing tests", "parseTitle takes the trailing Title line");
+	assert(body === "## Context\nwork\n## Task\ndo it\n", "parseTitle strips the Title line and trailing blank");
+}
+{
+	const { title } = parseTitle("## Task\nx\n\n## Title: Markdown heading title\n", "fb");
+	assert(title === "Markdown heading title", "parseTitle tolerates heading markers");
+}
+{
+	const { title, body } = parseTitle("Title: Top title\n## Context\nx\n", "fb");
+	assert(title === "Top title", "parseTitle scans the whole text when the line is not last");
+	assert(body === "## Context\nx\n", "parseTitle strips a mid-text title line");
+}
+{
+	const { title, body } = parseTitle("## Context\nx\n", "fallback goal");
+	assert(title === "fallback goal", "parseTitle falls back to the goal when no Title line");
+	assert(body === "## Context\nx\n", "parseTitle keeps the body untouched on fallback");
+}
+{
+	assert(sanitizeTitle("  a   b\tc ") === "a b c", "sanitizeTitle collapses whitespace");
+	const long = parseTitle("## C\n\nTitle: " + "y".repeat(100) + "\n", "fb");
+	assert(long.title.length === 60, "parseTitle truncates titles to 60 chars");
+	const only = parseTitle("Title: only title\n", "fb");
+	assert(only.title === "only title", "parseTitle handles a title-only response");
+}
+
 // --- draft picker navigation (mock ui.custom, pure string rendering) ----------
 
 {
 	const PK = join(WORK, "picker");
 	mkdirSync(PK, { recursive: true });
-	const metaA = { name: "20260115-1430.md", goal: "fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s1.md", model: "m1" };
-	const metaB = { name: "20260116-0900.md", goal: "deploy the app", created: "2026-01-16T09:00:00.000Z", source: "s2.md", model: "m1" };
+	const metaA = { name: "20260115-1430.md", goal: "fix the tests", title: "Fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s1.md", model: "m1" };
+	const metaB = { name: "20260116-0900.md", goal: "deploy the app", title: "Deploy the app", created: "2026-01-16T09:00:00.000Z", source: "s2.md", model: "m1" };
 	writeDraft(PK, metaA.name, metaA, "A");
 	writeDraft(PK, metaB.name, metaB, "B");
 
@@ -244,8 +287,8 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 {
 	const PK = join(WORK, "picker3");
 	mkdirSync(PK, { recursive: true });
-	writeDraft(PK, "20260115-1430.md", { name: "20260115-1430.md", goal: "fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s", model: "m" }, "A");
-	writeDraft(PK, "20260116-0900.md", { name: "20260116-0900.md", goal: "deploy the app", created: "2026-01-16T09:00:00.000Z", source: "s", model: "m" }, "B");
+	writeDraft(PK, "20260115-1430.md", { name: "20260115-1430.md", goal: "fix the tests", title: "Fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s", model: "m" }, "A");
+	writeDraft(PK, "20260116-0900.md", { name: "20260116-0900.md", goal: "deploy the app", title: "Deploy the app", created: "2026-01-16T09:00:00.000Z", source: "s", model: "m" }, "B");
 	let factoryResult = null;
 	const mockCtx = {
 		cwd: PK,
@@ -279,7 +322,7 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	mkdirSync(PK, { recursive: true });
 	// long uuid-ish source + CJK goal (worst case for width)
 	const longSource = "2026-08-01T10-43-01-622Z_019fbceb-8d76-7fa0-9a1b-c2d3e4f5a6b7.jsonl";
-	writeDraft(PK, "20260801-1843.md", { name: "20260801-1843.md", goal: "你好，这是一段非常长的中文交接目标用来测试宽度截断是否生效，应该被安全截断", created: "2026-08-01T10:43:00.000Z", source: longSource, model: "deepseek-v4-flash" }, "A");
+	writeDraft(PK, "20260801-1843.md", { name: "20260801-1843.md", goal: "你好，这是一段非常长的中文交接目标用来测试宽度截断是否生效，应该被安全截断", title: "中文标题", created: "2026-08-01T10:43:00.000Z", source: longSource, model: "deepseek-v4-flash" }, "A");
 	let factoryResult = null;
 	const mockCtx = {
 		cwd: PK,

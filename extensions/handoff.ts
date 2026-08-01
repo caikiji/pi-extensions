@@ -30,6 +30,13 @@
  *      defaults to Cancel). No pi-tui dependency - dialogs render as plain
  *      strings, so they work in any runtime.
  *   5. No-args /handoff opens a goal editor instead of a usage error.
+ *   6. Session naming: the same generation call also produces a one-line
+ *      "Title:" as its final line (strictly constrained: one line, plain
+ *      text, <= 60 chars, same language as the goal). The title is stripped
+ *      from the prompt, stored in the draft front matter, and applied to the
+ *      new session via pi.setSessionName() inside withSession (runtime
+ *      actions are re-bound to the replacement session before withSession
+ *      runs). The goal is the fallback when the model omits the line.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -62,8 +69,15 @@ Files involved:
 Unfinished: ...; uncommitted changes: ... (if any)
 
 ## Task
-[Clear description of what to do next based on user's goal]`;
+[Clear description of what to do next based on user's goal]
 
+Title: Fix the failing tests
+
+End your response with the Title line after a blank line - it is the only thing after the prompt body. Title constraints:
+- Exactly one line, plain text, no markdown formatting, no heading markers, no trailing period
+- Same language as the goal, at most 60 characters
+- Summarizes the next task (what the new thread will do), not the old session's history
+- Nothing may follow the Title line`;
 // ============================================================================
 // Draft store (pure Node - testable without the pi runtime)
 // ============================================================================
@@ -71,6 +85,7 @@ Unfinished: ...; uncommitted changes: ... (if any)
 export interface HandoffDraftMeta {
 	name: string; // filename, e.g. 20260115-1430.md
 	goal: string; // user goal, single line
+	title: string; // short session title (empty for legacy drafts; falls back to goal)
 	created: string; // ISO timestamp of the save
 	source: string; // source session file basename
 	model: string; // model id used for generation
@@ -120,6 +135,7 @@ export function serializeFrontMatter(meta: HandoffDraftMeta, content: string): s
 	return [
 		"---",
 		`goal: ${meta.goal}`,
+		`title: ${meta.title}`,
 		`created: ${meta.created}`,
 		`source: ${meta.source}`,
 		`model: ${meta.model}`,
@@ -139,7 +155,7 @@ export function readDraft(cwd: string, name: string): HandoffDraft | null {
 	if (!existsSync(path)) return null;
 	const { meta, content } = parseFrontMatter(readFileSync(path, "utf8"));
 	return {
-		meta: { name, goal: meta.goal ?? "", created: meta.created ?? "", source: meta.source ?? "", model: meta.model ?? "" },
+		meta: { name, goal: meta.goal ?? "", title: meta.title ?? "", created: meta.created ?? "", source: meta.source ?? "", model: meta.model ?? "" },
 		content,
 		path,
 	};
@@ -207,6 +223,42 @@ export function goalLine(goal: string, max = 60): string {
 	return one.length > max ? one.slice(0, max) : one;
 }
 
+/** One-line title: collapse whitespace and truncate to 60 chars. */
+export function sanitizeTitle(raw: string): string {
+	const one = raw.replace(/\s+/g, " ").trim();
+	return one.length > 60 ? one.slice(0, 60) : one;
+}
+
+/**
+ * Strip the model's closing "Title: ..." line from a handoff prompt and
+ * return it as the session title. The system prompt asks for the title as
+ * the final line after a blank line; tolerate a heading-prefixed line
+ * ("## Title: x") and a title anywhere in the text as fallbacks. Falls
+ * back to `fallback` (the goal) when no title line exists, so the caller
+ * always gets a usable title.
+ */
+export function parseTitle(prompt: string, fallback: string): { title: string; body: string } {
+	const lines = prompt.split("\n");
+	const titleLine = (line: string) => /^#*\s*title:\s*(.+)$/i.exec(line.trim());
+	const stripAt = (i: number) => {
+		const title = sanitizeTitle(titleLine(lines[i])![1]);
+		lines.splice(i, 1);
+		const body = lines.join("\n").replace(/\n+$/, "") + "\n";
+		return { title, body };
+	};
+	// Preferred: the title is the last non-empty line.
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (lines[i].trim() === "") continue;
+		if (titleLine(lines[i])) return stripAt(i);
+		break; // last non-empty line is not a title - stop scanning
+	}
+	// Fallback: any Title: line in the text (model put it at the top).
+	for (let i = 0; i < lines.length; i++) {
+		if (titleLine(lines[i])) return stripAt(i);
+	}
+	return { title: sanitizeTitle(fallback), body: prompt };
+}
+
 // ============================================================================
 // Extension
 // ============================================================================
@@ -263,7 +315,7 @@ function metaLines(d: HandoffDraft): string {
 
 
 /** Generate the handoff prompt with loader UI. Returns null on cancel/failure. */
-async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Promise<string | null> {
+async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Promise<{ prompt: string; title: string } | null> {
 	// Gather conversation context from current branch. If the branch was compacted,
 	// include the compaction summary plus entries from firstKeptEntryId onward.
 	const messages = getHandoffMessages(ctx.sessionManager.getBranch());
@@ -348,11 +400,13 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 		}
 		return null;
 	}
-	return result;
+	// The model closes with a "Title: ..." line; strip it and use it as the
+	// new session's display name (the goal is the fallback).
+	return parseTitle(result, goal);
 }
 
 /** Auto-save the generated prompt; returns the repo-relative path for display. */
-function saveDraftFor(ctx: ExtensionCommandContext, goal: string, content: string): string {
+function saveDraftFor(ctx: ExtensionCommandContext, goal: string, title: string, content: string): string {
 	const dir = draftsDir(ctx.cwd);
 	const now = new Date();
 	const name = uniqueDraftName(dir, now);
@@ -360,6 +414,7 @@ function saveDraftFor(ctx: ExtensionCommandContext, goal: string, content: strin
 	const meta: HandoffDraftMeta = {
 		name,
 		goal: goal.replace(/\s+/g, " ").trim(),
+		title,
 		created: now.toISOString(),
 		source: sessionFile ? basename(sessionFile) : "",
 		model: ctx.model?.id ?? "",
@@ -368,13 +423,18 @@ function saveDraftFor(ctx: ExtensionCommandContext, goal: string, content: strin
 	return `.pi/handoffs/${name}`;
 }
 
-/** Create the new session with the final prompt staged in the editor. */
-async function startNewSession(ctx: ExtensionCommandContext, prompt: string): Promise<void> {
+/**
+ * Create the new session with the final prompt staged in the editor and a
+ * display name. Runtime actions are re-bound to the replacement session
+ * before withSession runs, so pi.setSessionName() names the new session.
+ */
+async function startNewSession(ctx: ExtensionCommandContext, prompt: string, title: string, pi: ExtensionAPI): Promise<void> {
 	const currentSessionFile = ctx.sessionManager.getSessionFile();
 	const newSessionResult = await ctx.newSession({
 		parentSession: currentSessionFile,
 		withSession: async (replacementCtx) => {
 			replacementCtx.ui.setEditorText(prompt);
+			pi.setSessionName(title);
 			replacementCtx.ui.notify("Handoff ready. Submit when ready.", "info");
 		},
 	});
@@ -384,7 +444,7 @@ async function startNewSession(ctx: ExtensionCommandContext, prompt: string): Pr
 }
 
 /** /handoff [goal]: goal editor when empty, then generate -> auto-save -> review -> hand off. */
-async function handleGoal(ctx: ExtensionCommandContext, goal: string): Promise<void> {
+async function handleGoal(ctx: ExtensionCommandContext, goal: string, pi: ExtensionAPI): Promise<void> {
 	if (!ctx.model) {
 		ctx.ui.notify("No model selected", "error");
 		return;
@@ -401,26 +461,27 @@ async function handleGoal(ctx: ExtensionCommandContext, goal: string): Promise<v
 		}
 	}
 
-	const prompt = await generateHandoff(ctx, goal);
-	if (prompt === null) return;
+	const generated = await generateHandoff(ctx, goal);
+	if (generated === null) return;
+	const { prompt, title } = generated;
 
-	saveDraftFor(ctx, goal, prompt);
-
+	saveDraftFor(ctx, goal, title, prompt);
 	const edited = await ctx.ui.editor("Review handoff prompt", prompt);
 	if (edited === undefined) {
 		return;
 	}
-	await startNewSession(ctx, edited);
+	await startNewSession(ctx, edited, title, pi);
 }
 
 /** Review a draft in the editor, then hand off with the (possibly edited) text. */
-async function editThenHandoff(ctx: ExtensionCommandContext, draft: HandoffDraft): Promise<void> {
+async function editThenHandoff(ctx: ExtensionCommandContext, draft: HandoffDraft, pi: ExtensionAPI): Promise<void> {
 	const edited = await ctx.ui.editor("Review handoff prompt", draft.content);
 	if (edited === undefined) {
 		ctx.ui.notify("Cancelled", "info");
 		return;
 	}
-	await startNewSession(ctx, edited);
+	// Legacy drafts (no title front matter) fall back to the goal.
+	await startNewSession(ctx, edited, draft.meta.title || draft.meta.goal, pi);
 }
 
 function isPrintable(data: string): boolean {
@@ -643,7 +704,7 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 	});
 }
 /** /handoff list: pick a draft, then Load / Edit / Delete. */
-async function handleList(ctx: ExtensionCommandContext): Promise<void> {
+async function handleList(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
 	const drafts = listDrafts(ctx.cwd);
 	if (drafts.length === 0) {
 		ctx.ui.notify("No drafts saved yet", "info");
@@ -662,7 +723,7 @@ async function handleList(ctx: ExtensionCommandContext): Promise<void> {
 	}
 
 	if (op === "load") {
-		await editThenHandoff(ctx, draft);
+		await editThenHandoff(ctx, draft, pi);
 		return;
 	}
 	if (op === "edit") {
@@ -690,9 +751,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const action = parseHandoffArgs(args);
 				if (action.kind === "goal") {
-					await handleGoal(ctx, action.goal);
+					await handleGoal(ctx, action.goal, pi);
 				} else {
-					await handleList(ctx);
+					await handleList(ctx, pi);
 				}
 			} catch (err) {
 				ctx.ui.notify(`handoff error: ${err instanceof Error ? err.message : String(err)}`, "error");
