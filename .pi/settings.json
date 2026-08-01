@@ -1,1 +1,5 @@
-{ "extensions": ["../extensions"] }
+{
+  "packages": [
+    "git:github.com/caikiji/pi-extensions@main"
+  ]
+}

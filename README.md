@@ -20,10 +20,10 @@ Personal [pi](https://github.com/earendil-works/pi) extensions.
 pi install /path/to/pi-extensions
 
 # git 仓库
-pi install git:github.com/caikiji/pi-extensions
+pi install git:github.com/caikiji/pi-extensions@main
 
 # 仅安装到项目
-pi install -l git:github.com/caikiji/pi-extensions
+pi install -l git:github.com/caikiji/pi-extensions@main
 ```
 
 临时测试单个扩展：
