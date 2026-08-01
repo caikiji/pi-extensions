@@ -404,6 +404,10 @@ console.log("Test 15: git change annotation — [changed +N/-M] on modified symb
 	const out = await mod.runSkim({ path: f }, TMP);
 	assert(out.includes("[changed +2/-1]"), "outline renders [changed +2/-1]");
 	assert(out.includes("beta") && !out.includes("[changed]"), "only modified symbols flagged");
+	// untracked / non-repo file degrades to an empty change map (not a swallowed bug)
+	const f3 = mod.skimFile(join(TMP, "src", "index.ts"));
+	const ch3 = mod.gitSymbolChanges(f3.symbols, join(TMP, "src", "index.ts"));
+	assert(ch3.size === 0, "untracked file -> empty changes (graceful degradation)");
 }
 
 rmSync(TMP, { recursive: true, force: true });
