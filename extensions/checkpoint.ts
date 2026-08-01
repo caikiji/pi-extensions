@@ -27,6 +27,12 @@
  *     to HEAD).
  *   - An automatic checkpoint is taken at every turn_start (ring of 20), so the
  *     agent always has a recent save point even without asking.
+ *
+ * Prompt integration: promptSnippet opts checkpoint_list / checkpoint_restore
+ * into the system prompt's Available tools section (without it custom tools
+ * are invisible there), and promptGuidelines on checkpoint_restore add flat
+ * "save before risky work / restore after failures" bullets to the Guidelines
+ * section so the model reaches for the tools when they are relevant.
  */
 
 import { createHash } from "node:crypto";
@@ -494,6 +500,10 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 		name: "checkpoint_list",
 		label: "List checkpoints",
 		description: "List git checkpoints (save points) for the current repo with id, time, message, and file counts.",
+		// One-liner for the system prompt's Available tools section - without it
+		// custom tools are left out entirely and the model never considers them.
+		promptSnippet:
+			"List git checkpoints (save points) for the current repo with id, time, message, and file counts.",
 		parameters: (schema ?? {}) as never,
 		async execute(_toolCallId, params: CheckpointParams, _signal, _onUpdate, ctx) {
 			try {
@@ -521,6 +531,17 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 		label: "Restore checkpoint",
 		description:
 			"Restore a git checkpoint: reverts exactly the files it captured (tracked + untracked) without touching unrelated uncommitted changes. Refuses files you modified after the checkpoint unless force=true. Use id 'latest' for the most recent.",
+		// One-liner for the system prompt's Available tools section.
+		promptSnippet:
+			"Restore a git checkpoint: reverts exactly the files it captured without touching unrelated uncommitted changes; files changed after the checkpoint need force=true.",
+		// Flat bullets in the system prompt's Guidelines section; each must name the
+		// tool explicitly. Put them on checkpoint_restore (the main action tool) so
+		// they appear once, not duplicated per tool.
+		promptGuidelines: [
+			"Before risky or multi-file edits, recommend the user save a checkpoint with /checkpoint <msg> (an automatic save point also exists for every turn), so the work can be undone later.",
+			"When edits went wrong or an experiment failed, call checkpoint_restore with id 'latest' to revert exactly the files captured since the save point; unrelated uncommitted changes are never touched, and files you changed after the checkpoint are refused unless force=true.",
+			"When a specific save point is needed, call checkpoint_list first to see ids, times, messages, and file counts; pass the repo parameter when the session cwd is outside the git repository.",
+		],
 		parameters: (restoreSchema ?? {}) as never,
 		async execute(_toolCallId, params: RestoreParams, _signal, _onUpdate, ctx) {
 			try {

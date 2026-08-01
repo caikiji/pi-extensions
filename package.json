@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Personal pi extensions: handoff, rules, skim, checkpoint",
   "type": "module",
   "keywords": [
