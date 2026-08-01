@@ -2,7 +2,7 @@
 // Loads the real extension with a fake pi API — no network, no pi session, no npm deps.
 // Requires Node >= 22.18 (native TypeScript type stripping) — just run:  node tests/skim.test.mjs
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -273,6 +273,7 @@ console.log("Test 10: regex literals do not break spans; output is pure ASCII");
 	assert(byName["named"]?.kind === "function", "export default async function -> kind function");
 	assert(byName["rex"].desc === "Doc with regexes.", "docblock desc not polluted by closing */");
 	const outline = mod.formatOutline({ path: "f.ts", lang: "ts", lines: src.length, bytes: 200, symbols: syms }, {});
+	// eslint-disable-next-line no-control-regex
 	assert(!/[^\x00-\x7F]/.test(outline), "outline output is pure ASCII");
 	assert(outline.includes("lines |") && !outline.includes("行"), "English units in header");
 }
@@ -285,6 +286,7 @@ console.log("Test 11: bare dirs at depth limit, filter guard, first-line desc");
 	assert(srcDir !== undefined && srcDir.dir === true, "depth 1 lists src/ as a bare dir entry");
 	const flat = mod.formatDir(d1);
 	assert(flat.includes("src/ (dir)"), "formatDir marks bare dirs");
+	// eslint-disable-next-line no-control-regex
 	assert(!/[^\x00-\x7F]/.test(flat), "dir output pure ASCII");
 	let err = null;
 	try {

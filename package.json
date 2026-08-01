@@ -8,7 +8,8 @@
   ],
   "license": "MIT",
   "scripts": {
-    "test": "node tests/run-all.mjs"
+    "test": "node tests/run-all.mjs",
+    "lint": "eslint ."
   },
   "pi": {
     "extensions": [
@@ -19,8 +20,12 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "typescript-eslint": "^8.65.0"
   }
 }

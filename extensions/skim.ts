@@ -21,7 +21,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, parse, relative, resolve, sep } from "node:path";
+import { basename, extname, join, parse, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 // ============================================================================
@@ -893,16 +893,6 @@ function firstOf(text: string, isMarkdown: boolean): string | undefined {
 		return t.slice(0, 60);
 	}
 	return undefined;
-}
-
-function firstMeaningfulLine(file: string): string | undefined {
-	try {
-		const buf = readFileSync(file);
-		if (isBinary(buf)) return undefined;
-		return firstOf(buf.toString("utf8"), /\.(md|markdown)$/i.test(file));
-	} catch {
-		return undefined;
-	}
 }
 
 function walkDir(
