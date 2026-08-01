@@ -12,18 +12,25 @@
  *   /restore <id|latest>      restore a checkpoint (--force overrides conflicts)
  *
  * Implementation:
- *   - `git stash create` snapshots the working tree as a commit object without
- *     touching the worktree; the sha is kept alive via refs/pi-checkpoints/<id>.
- *   - Tracked files are restored with `git restore --source=<sha> --worktree`.
+ *   - `git stash create` snapshots the tracked working tree as a commit object
+ *     without touching the worktree; the sha is kept alive via
+ *     refs/pi-checkpoints/<id>. Entries with no tracked changes still capture
+ *     untracked files (their sha is "").
+ *   - All git commands run from the repo root (resolved via --show-toplevel),
+ *     so the extension works from any cwd inside or outside the repo.
+ *   - Tracked files are restored with `git restore --source=<sha> --worktree --staged`.
  *   - Untracked (new) files are copied into .git/pi-checkpoints/<id>/untracked/
  *     at snapshot time and copied back on restore.
  *   - Restore refuses (unless --force) any file whose current content differs
- *     from BOTH the snapshot and HEAD — that means you changed it too.
+ *     from the snapshot — that means you changed it too (a batched,
+ *     filter-aware `git diff` catches edits, staged changes, and reverts
+ *     to HEAD).
  *   - An automatic checkpoint is taken at every turn_start (ring of 20), so the
  *     agent always has a recent save point even without asking.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -47,6 +54,7 @@ export interface RestoreResult {
 	restored: string[];
 	conflicts: string[];
 	wouldDelete: string[]; // files deleted in the snapshot; removed only with force
+	id?: string; // restored checkpoint id
 	error?: string;
 }
 
@@ -74,18 +82,34 @@ async function execOk(exec: ExecFn, cwd: string, cmd: string, args: string[]): P
 	return res;
 }
 
-/** Absolute path of the git dir for cwd, or null if not a repo. Cached. */
-const gitDirCache = new Map<string, string | null>();
-async function getGitDir(exec: ExecFn, cwd: string): Promise<string | null> {
-	const hit = gitDirCache.get(cwd);
+/** Repo root for a cwd, or null if not inside a repo. Cached. */
+const rootCache = new Map<string, string | null>();
+async function getRepoRoot(exec: ExecFn, cwd: string): Promise<string | null> {
+	const hit = rootCache.get(cwd);
 	if (hit !== undefined) return hit;
 	try {
-		const res = await exec("git", ["rev-parse", "--absolute-git-dir"], { cwd });
+		const res = await exec("git", ["rev-parse", "--show-toplevel"], { cwd });
+		const root = res.code === 0 ? res.stdout.trim() : "";
+		rootCache.set(cwd, root || null);
+		return root || null;
+	} catch {
+		rootCache.set(cwd, null);
+		return null;
+	}
+}
+
+/** Absolute path of the git dir for a repo root, or null if not a repo. Cached. */
+const gitDirCache = new Map<string, string | null>();
+async function getGitDir(exec: ExecFn, root: string): Promise<string | null> {
+	const hit = gitDirCache.get(root);
+	if (hit !== undefined) return hit;
+	try {
+		const res = await exec("git", ["rev-parse", "--absolute-git-dir"], { cwd: root });
 		const dir = res.code === 0 ? res.stdout.trim() : "";
-		gitDirCache.set(cwd, dir || null);
+		gitDirCache.set(root, dir || null);
 		return dir || null;
 	} catch {
-		gitDirCache.set(cwd, null);
+		gitDirCache.set(root, null);
 		return null;
 	}
 }
@@ -113,28 +137,15 @@ function saveState(gitDir: string, state: State): void {
 	mkdirSync(stateDirOf(gitDir), { recursive: true });
 	const tmp = stateFileOf(gitDir) + ".tmp";
 	writeFileSync(tmp, JSON.stringify(state, null, 2));
-	rmSync(stateFileOf(gitDir), { force: true });
-	writeFileSync(stateFileOf(gitDir), JSON.stringify(state, null, 2));
-	rmSync(tmp, { force: true });
+	renameSync(tmp, stateFileOf(gitDir));
 }
 
-/** Hash of a file's content ("" if missing). Cheap conflict detection. */
-async function fileHash(exec: ExecFn, cwd: string, path: string): Promise<string> {
+/** sha1 of a file's raw bytes, or null if missing/unreadable. */
+function sha1File(path: string): string | null {
 	try {
-		const res = await exec("git", ["hash-object", path], { cwd });
-		return res.code === 0 ? res.stdout.trim() : "";
+		return createHash("sha1").update(readFileSync(path)).digest("hex");
 	} catch {
-		return "";
-	}
-}
-
-/** Blob hash of path inside a commit ("" if absent there). */
-async function blobHash(exec: ExecFn, cwd: string, sha: string, path: string): Promise<string> {
-	try {
-		const res = await exec("git", ["rev-parse", `${sha}:${path}`], { cwd });
-		return res.code === 0 ? res.stdout.trim() : "";
-	} catch {
-		return "";
+		return null;
 	}
 }
 
@@ -155,30 +166,40 @@ function makeId(auto: boolean): string {
 // ============================================================================
 
 export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, auto = false): Promise<CheckpointEntry | null> {
-	const gitDir = await getGitDir(exec, cwd);
+	const root = await getRepoRoot(exec, cwd);
+	if (!root) return null;
+	const gitDir = await getGitDir(exec, root);
 	if (!gitDir) return null;
 
-	// `git stash create` returns "" when the worktree is clean.
+	// `git stash create` returns "" when the tracked tree is clean and fails
+	// on a fresh repo with no initial commit (only untracked files exist).
+	let sha = "";
 	const shaRes = await exec(
 		"git",
 		["-c", "user.name=pi", "-c", "user.email=pi@local", "stash", "create", msg || (auto ? "auto" : "checkpoint")],
-		{ cwd },
+		{ cwd: root },
 	);
-	if (shaRes.code !== 0) return null;
-	const sha = shaRes.stdout.trim();
-	if (!sha) return null;
+	if (shaRes.code !== 0) {
+		const headRes = await exec("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root });
+		if (headRes.code !== 0) sha = ""; // fresh repo: untracked-only capture below
+		else return null; // real failure
+	} else {
+		sha = shaRes.stdout.trim();
+	}
 
 	const id = makeId(auto);
-	await execOk(exec, cwd, "git", ["update-ref", `refs/pi-checkpoints/${id}`, sha]);
 
 	// Files changed vs HEAD (first parent of the stash commit).
-	const diffRes = await execOk(exec, cwd, "git", ["diff-tree", "-r", "--name-only", "-z", `${sha}^`, sha]);
-	const tracked = diffRes.stdout.split("\0").filter(Boolean);
+	const tracked: string[] = [];
+	if (sha) {
+		const diffRes = await execOk(exec, root, "git", ["diff-tree", "-r", "--name-only", "-z", `${sha}^`, sha]);
+		tracked.push(...diffRes.stdout.split("\0").filter(Boolean));
+	}
 
 	// Capture untracked files (new files the agent created).
 	const untracked: string[] = [];
 	const skipped: string[] = [];
-	const untrackedRes = await execOk(exec, cwd, "git", ["ls-files", "--others", "--exclude-standard", "-z"]);
+	const untrackedRes = await execOk(exec, root, "git", ["ls-files", "--others", "--exclude-standard", "-z"]);
 	const candidates = untrackedRes.stdout.split("\0").filter(Boolean);
 	let totalBytes = 0;
 	for (const rel of candidates) {
@@ -186,9 +207,9 @@ export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, a
 			skipped.push(rel);
 			continue;
 		}
-		let st;
+		let st: ReturnType<typeof statSync> | undefined;
 		try {
-			st = statSync(join(cwd, rel));
+			st = statSync(join(root, rel));
 		} catch {
 			continue;
 		}
@@ -199,10 +220,16 @@ export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, a
 		}
 		const dest = join(stateDirOf(gitDir), id, "untracked", rel);
 		mkdirSync(dirname(dest), { recursive: true });
-		copyFileSync(join(cwd, rel), dest);
+		copyFileSync(join(root, rel), dest);
 		totalBytes += st.size;
 		untracked.push(rel);
 	}
+
+	// Nothing changed at all: no tracked diff and no untracked files.
+	if (!sha && untracked.length === 0) return null;
+
+	// Keep the snapshot commit alive against gc (untracked-only entries have no sha).
+	if (sha) await execOk(exec, root, "git", ["update-ref", `refs/pi-checkpoints/${id}`, sha]);
 
 	const entry: CheckpointEntry = { id, msg: msg || (auto ? "auto" : "checkpoint"), ts: Date.now(), sha, tracked, untracked, skipped, auto };
 
@@ -214,7 +241,7 @@ export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, a
 	const autoEntries = state.entries.filter((e) => e.auto);
 	const toDropAuto = autoEntries.slice(AUTO_RING);
 	for (const e of toDropAuto) {
-		await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd });
+		if (e.sha) await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd: root });
 		rmSync(join(stateDirOf(gitDir), e.id), { recursive: true, force: true });
 	}
 	state.entries = state.entries.filter((e) => !toDropAuto.some((d) => d.id === e.id));
@@ -223,7 +250,7 @@ export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, a
 	const manual = state.entries.filter((e) => !e.auto);
 	const toDropManual = manual.slice(MANUAL_MAX);
 	for (const e of toDropManual) {
-		await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd });
+		if (e.sha) await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd: root });
 		rmSync(join(stateDirOf(gitDir), e.id), { recursive: true, force: true });
 	}
 	state.entries = state.entries.filter((e) => !toDropManual.some((d) => d.id === e.id));
@@ -233,7 +260,9 @@ export async function createCheckpoint(exec: ExecFn, cwd: string, msg: string, a
 }
 
 export async function listCheckpoints(exec: ExecFn, cwd: string): Promise<CheckpointEntry[]> {
-	const gitDir = await getGitDir(exec, cwd);
+	const root = await getRepoRoot(exec, cwd);
+	if (!root) return [];
+	const gitDir = await getGitDir(exec, root);
 	if (!gitDir) return [];
 	const state = loadState(gitDir);
 	return state.entries.sort((a, b) => b.ts - a.ts);
@@ -245,7 +274,9 @@ export async function restoreCheckpoint(
 	idOrLatest: string,
 	opts: { force?: boolean } = {},
 ): Promise<RestoreResult> {
-	const gitDir = await getGitDir(exec, cwd);
+	const root = await getRepoRoot(exec, cwd);
+	if (!root) return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` };
+	const gitDir = await getGitDir(exec, root);
 	if (!gitDir) return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` };
 
 	const state = loadState(gitDir);
@@ -264,40 +295,58 @@ export async function restoreCheckpoint(
 	const wouldDelete: string[] = [];
 	const restoreable: string[] = [];
 
-	// Tracked files: compare current vs HEAD vs snapshot hashes.
-	for (const rel of entry.tracked) {
-		const cur = await fileHash(exec, cwd, rel);
-		const head = await blobHash(exec, cwd, "HEAD", rel);
-		const snap = await blobHash(exec, cwd, entry.sha, rel);
-		if (cur && cur !== head && cur !== snap) {
-			if (!force) {
-				conflicts.push(rel);
-				continue;
-			}
-			// force: fall through and overwrite the conflicting file
+	// Split tracked paths into "present in the snapshot tree" (restore them
+	// from the commit) vs "deleted in the snapshot" (remove with --force).
+	let present: string[] = [];
+	if (entry.sha) {
+		const treeRes = await execOk(exec, root, "git", ["ls-tree", "-r", "--name-only", entry.sha]);
+		const treePaths = new Set(treeRes.stdout.split("\n").filter(Boolean));
+		present = entry.tracked.filter((rel) => treePaths.has(rel));
+		for (const rel of entry.tracked) {
+			if (!treePaths.has(rel) && existsSync(join(root, rel))) wouldDelete.push(rel);
 		}
-		if (!snap) {
-			// Deleted in the snapshot: restoring means deleting it.
-			if (cur) wouldDelete.push(rel);
-			continue;
-		}
-		restoreable.push(rel);
 	}
 
-	// Untracked files: compare current vs stored copy.
+	// Tracked conflicts: one batched, filter-aware `git diff` between the
+	// snapshot and the current index+worktree (catches edits, staged changes,
+	// and reverts to HEAD). Deletions (D) are excluded - restoring recreates
+	// a file that was deleted since the checkpoint.
+	if (entry.sha && present.length > 0) {
+		const diffRes = await exec("git", ["diff", "--name-only", "--diff-filter=AMT", "--no-renames", entry.sha, "--", ...present], { cwd: root });
+		if (diffRes.code === 0) {
+			const dirty = new Set(diffRes.stdout.split("\n").filter(Boolean));
+			for (const rel of present) {
+				if (dirty.has(rel)) {
+					if (!force) {
+						conflicts.push(rel);
+						continue;
+					}
+					// force: overwrite below
+				}
+				restoreable.push(rel);
+			}
+		} else {
+			// diff failed (e.g. missing tree): refuse everything
+			if (!force) conflicts.push(...present);
+			else restoreable.push(...present);
+		}
+	}
+
+	// Untracked files: compare current content vs stored copy (raw sha1).
+	const untrackedOk: string[] = [];
 	for (const rel of entry.untracked) {
 		const stored = join(stateDirOf(gitDir), entry.id, "untracked", rel);
 		if (!existsSync(stored)) continue;
-		const cur = await fileHash(exec, cwd, rel);
-		const snap = await fileHash(exec, cwd, stored);
-		if (cur && cur !== snap) {
+		const curHash = sha1File(join(root, rel));
+		const snapHash = sha1File(stored);
+		if (curHash !== null && curHash !== snapHash) {
 			if (!force) {
 				conflicts.push(rel);
 				continue;
 			}
 			// force: overwrite below
 		}
-		restored.push(rel);
+		untrackedOk.push(rel);
 	}
 
 	if (conflicts.length > 0 && !force) {
@@ -306,6 +355,7 @@ export async function restoreCheckpoint(
 			restored: [],
 			conflicts,
 			wouldDelete,
+			id: entry.id,
 			error: `${conflicts.length} file(s) changed since the checkpoint - use --force to overwrite them`,
 		};
 	}
@@ -313,46 +363,48 @@ export async function restoreCheckpoint(
 	// Save a pre-restore snapshot so the restore itself can be undone.
 	// Best-effort: never block the restore on snapshot failure.
 	try {
-		await createCheckpoint(exec, cwd, `pre-restore ${entry.id}`, false);
+		await createCheckpoint(exec, root, `pre-restore ${entry.id}`, false);
 	} catch {
 		// ignore
 	}
 
-	// Apply: tracked files from the snapshot commit.
-	if (restoreable.length > 0) {
-		await execOk(exec, cwd, "git", ["restore", "--source=" + entry.sha, "--worktree", "--", ...restoreable]);
+	// Apply: tracked files from the snapshot commit (worktree + index).
+	if (entry.sha && restoreable.length > 0) {
+		await execOk(exec, root, "git", ["restore", "--source=" + entry.sha, "--worktree", "--staged", "--", ...restoreable]);
 	}
 	restored.push(...restoreable);
 
 	// Apply: untracked files from the stored copies.
-	for (const rel of entry.untracked) {
+	for (const rel of untrackedOk) {
 		const stored = join(stateDirOf(gitDir), entry.id, "untracked", rel);
-		if (!existsSync(stored)) continue;
-		const dest = join(cwd, rel);
+		const dest = join(root, rel);
 		mkdirSync(dirname(dest), { recursive: true });
 		copyFileSync(stored, dest);
+		restored.push(rel);
 	}
 
 	// Deleted-in-snapshot files: only remove with --force.
 	if (wouldDelete.length > 0) {
 		if (force) {
-			for (const rel of wouldDelete) rmSync(join(cwd, rel), { force: true });
+			for (const rel of wouldDelete) rmSync(join(root, rel), { force: true });
 			restored.push(...wouldDelete.map((r) => `${r} (deleted)`));
 			wouldDelete.length = 0;
 		}
 	}
 
-	return { ok: true, restored, conflicts, wouldDelete };
+	return { ok: true, restored, conflicts, wouldDelete, id: entry.id };
 }
 
 export async function dropCheckpoint(exec: ExecFn, cwd: string, idOrAll: string): Promise<string[]> {
-	const gitDir = await getGitDir(exec, cwd);
+	const root = await getRepoRoot(exec, cwd);
+	if (!root) return [];
+	const gitDir = await getGitDir(exec, root);
 	if (!gitDir) return [];
 	const state = loadState(gitDir);
 	const targets = idOrAll === "all" ? state.entries : state.entries.filter((e) => e.id === idOrAll || e.id.startsWith(idOrAll));
 	const dropped: string[] = [];
 	for (const e of targets) {
-		await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd });
+		if (e.sha) await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd: root });
 		rmSync(join(stateDirOf(gitDir), e.id), { recursive: true, force: true });
 		dropped.push(e.id);
 	}
@@ -377,9 +429,10 @@ export function formatEntries(entries: CheckpointEntry[], full = false): string 
 	if (entries.length === 0) return "no checkpoints yet - /checkpoint <msg> to save one";
 	const rows = entries.map((e) => {
 		const tag = e.auto ? "[auto] " : "";
+		const utag = !e.sha && e.untracked.length > 0 ? "[untracked-only] " : "";
 		const files = e.tracked.length + e.untracked.length;
 		const skip = e.skipped.length > 0 ? ` (+${e.skipped.length} skipped)` : "";
-		let row = `${e.id}  ${fmtTs(e.ts)}  ${tag}${e.msg} | ${files} file${files === 1 ? "" : "s"}${skip}`;
+		let row = `${e.id}  ${fmtTs(e.ts)}  ${tag}${utag}${e.msg} | ${files} file${files === 1 ? "" : "s"}${skip}`;
 		if (full && files > 0) {
 			row += "\n    " + [...e.tracked, ...e.untracked].slice(0, 12).join("  ");
 			if (e.tracked.length + e.untracked.length > 12) row += "  ...";
@@ -395,6 +448,7 @@ export function formatEntries(entries: CheckpointEntry[], full = false): string 
 
 interface CheckpointParams {
 	json?: boolean;
+	full?: boolean; // include per-checkpoint file lists in text output
 	repo?: string; // repo dir (relative to cwd or absolute) when the session cwd is outside the repo
 }
 
@@ -411,6 +465,7 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 		const { Type } = await import("typebox");
 		schema = Type.Object({
 			json: Type.Optional(Type.Boolean({ description: "Return machine-readable JSON" })),
+			full: Type.Optional(Type.Boolean({ description: "Include per-checkpoint file lists in text output" })),
 			repo: Type.Optional(Type.String({ description: "Repo directory (relative to cwd or absolute) - use when the session cwd is outside the repo" })),
 		});
 		restoreSchema = Type.Object({
@@ -440,12 +495,12 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 			try {
 				const exec = (cmd: string, args: string[], opts?: { cwd?: string }) => pi.exec(cmd, args, opts);
 				const cwd = params.repo ? resolve(ctx.cwd, params.repo) : ctx.cwd;
-				const gitDir = await getGitDir(exec, cwd);
-				if (!gitDir) {
+				const root = await getRepoRoot(exec, cwd);
+				if (!root) {
 					return { content: [{ type: "text", text: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` }], details: {}, isError: true };
 				}
 				const entries = await listCheckpoints(exec, cwd);
-				const text = params.json ? JSON.stringify(entries) : formatEntries(entries);
+				const text = params.json ? JSON.stringify(entries) : formatEntries(entries, params.full);
 				return { content: [{ type: "text", text }], details: {} };
 			} catch (err) {
 				return {
@@ -470,12 +525,12 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 				const res = await restoreCheckpoint(exec, cwd, params.id, { force: params.force });
 				const lines: string[] = [];
 				if (res.error) lines.push(`error: ${res.error}`);
-				if (res.restored.length > 0) lines.push(`restored ${res.restored.length} file(s)`);
+				if (res.ok && res.restored.length > 0) lines.push(`restored checkpoint ${res.id}: ${res.restored.length} file(s)`);
 				if (res.conflicts.length > 0) lines.push(`conflicts (not touched): ${res.conflicts.join(", ")}`);
 				if (res.wouldDelete.length > 0) lines.push(`would delete (need --force): ${res.wouldDelete.join(", ")}`);
 				return {
 					content: [{ type: "text", text: lines.join("\n") || (res.ok ? "nothing to restore" : "restore failed") }],
-					details: { ok: res.ok, restored: res.restored, conflicts: res.conflicts },
+					details: { ok: res.ok, id: res.id, restored: res.restored, conflicts: res.conflicts },
 					isError: !res.ok,
 				};
 			} catch (err) {
@@ -535,7 +590,7 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 					ctx.ui.notify(`restore: ${res.error}`, "error");
 					return;
 				}
-				ctx.ui.notify(`restored ${res.restored.length} file(s)${res.conflicts.length > 0 ? ` | ${res.conflicts.length} conflicts skipped` : ""}`, "info");
+				ctx.ui.notify(`restored checkpoint ${res.id}: ${res.restored.length} file(s)${res.conflicts.length > 0 ? ` | ${res.conflicts.length} conflicts skipped` : ""}`, "info");
 			} catch (err) {
 				ctx.ui.notify(`restore: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}

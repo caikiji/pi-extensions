@@ -22,8 +22,13 @@ rmSync(TMP, { recursive: true, force: true });
 mkdirSync(TMP, { recursive: true });
 
 function git(args, cwd = TMP) {
-	const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-	return { stdout: out, stderr: "", code: 0 };
+	try {
+		const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+		return { stdout: out, stderr: "", code: 0 };
+	} catch (err) {
+		// mimic pi.exec: non-zero exit returns a result instead of throwing
+		return { stdout: err.stdout ?? "", stderr: err.stderr ?? "", code: err.status ?? 1 };
+	}
 }
 const exec = (cmd, args, opts) => git(args, opts?.cwd ?? TMP);
 const read = (p) => readFileSync(join(TMP, p), "utf8");
@@ -211,6 +216,75 @@ console.log("Test 11: repo param, cwd-aware errors, pre-restore snapshot");
 	assert(all.some((e) => e.msg.startsWith("pre-restore")), "pre-restore snapshot created on restore");
 	rmSync(OUTSIDE, { recursive: true, force: true });
 }
+
+// ================= Test 12: untracked-only snapshot (Bug 2) =================
+console.log("Test 12: untracked-only checkpoint (no tracked changes)");
+{
+	git(["add", "-A"]);
+	git(["commit", "-qm", "clean for untracked-only"]);
+	write("uonly.txt", "u1");
+	const e = await mod.createCheckpoint(exec, TMP, "untracked only", false);
+	assert(e !== null && e.sha === "" && e.tracked.length === 0 && e.untracked.includes("uonly.txt"), "untracked-only checkpoint captures new file");
+	// break it, then restore brings it back
+	write("uonly.txt", "u2-broken");
+	const res = await mod.restoreCheckpoint(exec, TMP, e.id, { force: true });
+	assert(res.ok && read("uonly.txt") === "u1", "untracked-only restore works");
+}
+
+// ================= Test 13: subdir cwd (Bug 1) =================
+console.log("Test 13: create + restore from a subdirectory cwd");
+{
+	mkdirSync(join(TMP, "nested"), { recursive: true });
+	write("nested/f.txt", "n1");
+	const e = await mod.createCheckpoint(exec, join(TMP, "nested"), "subdir cp", false);
+	assert(e !== null && e.untracked.includes("nested/f.txt"), "untracked paths are repo-root-relative from subdir");
+	write("nested/f.txt", "n2-broken");
+	const res = await mod.restoreCheckpoint(exec, join(TMP, "nested"), e.id, { force: true });
+	assert(res.ok && read("nested/f.txt") === "n1", "restore from subdir cwd restores the right file");
+}
+
+// ================= Test 14: revert-to-HEAD is a conflict (Issue 3) =================
+console.log("Test 14: reverting a file to HEAD after the checkpoint is a conflict");
+{
+	write("a.txt", "issue3-v2");
+	const e = await mod.createCheckpoint(exec, TMP, "issue3", false);
+	git(["checkout", "-q", "HEAD", "--", "a.txt"]); // revert to HEAD after checkpoint
+	const res = await mod.restoreCheckpoint(exec, TMP, e.id);
+	assert(res.ok === false && res.conflicts.includes("a.txt"), "revert-to-HEAD is detected as a conflict");
+	// and --force still restores the snapshot content
+	const res2 = await mod.restoreCheckpoint(exec, TMP, e.id, { force: true });
+	assert(res2.ok && read("a.txt") === "issue3-v2", "force restores over the revert");
+}
+
+// ================= Test 15: fresh repo with no HEAD =================
+console.log("Test 15: fresh repo (no initial commit) captures untracked files");
+{
+	const FRESH = join(tmpdir(), "pi-cp-fresh-" + Date.now());
+	mkdirSync(FRESH, { recursive: true });
+	git(["init", "-q"], FRESH);
+	git(["config", "user.email", "t@t"], FRESH);
+	git(["config", "user.name", "t"], FRESH);
+	writeFileSync(join(FRESH, "fresh.txt"), "f1");
+	const e = await mod.createCheckpoint(exec, FRESH, "fresh", false);
+	assert(e !== null && e.sha === "" && e.untracked.includes("fresh.txt"), "fresh repo untracked-only checkpoint");
+	writeFileSync(join(FRESH, "fresh.txt"), "f2-broken");
+	const res = await mod.restoreCheckpoint(exec, FRESH, e.id, { force: true });
+	assert(res.ok && readFileSync(join(FRESH, "fresh.txt"), "utf8") === "f1", "fresh repo restore works");
+	rmSync(FRESH, { recursive: true, force: true });
+}
+
+// ================= Test 16: staged change after checkpoint =================
+console.log("Test 16: a staged change after the checkpoint is a conflict");
+{
+	write("a.txt", "staged-v1");
+	const e = await mod.createCheckpoint(exec, TMP, "staged", false);
+	write("a.txt", "staged-v2");
+	git(["add", "a.txt"]);
+	const res = await mod.restoreCheckpoint(exec, TMP, e.id);
+	assert(res.ok === false && res.conflicts.includes("a.txt"), "staged change detected as conflict");
+	git(["reset", "-q"]);
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
