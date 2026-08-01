@@ -22,6 +22,12 @@
  * a possibly-incomplete symbol list. When the file is inside a git repo,
  * uncommitted diff lines are counted per symbol and flagged [changed +N/-M]
  * so reviews start from the modified symbols instead of raw hunks.
+ *
+ * Prompt integration: promptSnippet opts skim into the system prompt's
+ * Available tools section (without it custom tools are invisible there), and
+ * promptGuidelines add flat "call skim before reading large files" bullets to
+ * the Guidelines section so the model reaches for skim instead of whole-file
+ * reads.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -1461,6 +1467,17 @@ export default async function skimExtension(pi: ExtensionAPI): Promise<void> {
 		label: "Skim",
 		description:
 			"Get a compact outline of a file (symbols with line numbers, line spans, and one-line descriptions; git-changed symbols are flagged [changed]), read a symbol's body directly (--read), or map a directory. Use before reading whole files to save context. Equivalent of a table of contents for code.",
+		// One-liner for the system prompt's Available tools section - without it
+		// custom tools are left out entirely and the model never considers skim.
+		promptSnippet:
+			"Get a compact outline of a file (symbols with line numbers) or map a directory; use before reading large files to save context",
+		// Flat bullets in the system prompt's Guidelines section; each must name
+		// the tool explicitly since the LLM cannot tell which tool "this" means.
+		promptGuidelines: [
+			"Before reading a large or unfamiliar file in full, call skim to get its outline, then read only the relevant sections.",
+			"To view a single symbol's body, call skim with the read parameter set to the symbol name or line number instead of reading the whole file.",
+			"To understand an unfamiliar directory, call skim on it for a compact map instead of listing and reading files one by one.",
+		],
 		parameters: (schema ?? {}) as never,
 		async execute(_toolCallId, params: SkimParams, _signal, _onUpdate, ctx) {
 			try {
