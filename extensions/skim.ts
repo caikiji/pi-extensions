@@ -21,7 +21,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, parse, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 // ============================================================================
@@ -1193,8 +1193,8 @@ function segToRe(seg: string): RegExp {
 /** Expand a glob (supporting *, **, ?) into matching file paths. Cap at 200. */
 export function expandGlob(pattern: string, cwd: string): string[] {
 	const abs = resolve(cwd, pattern);
-	const isAbs = abs.startsWith(sep);
-	const segs = abs.split(sep).filter((s) => s !== "");
+	const root = parse(abs).root; // drive root on Windows ("C:\\"), "/" on POSIX
+	const segs = abs.slice(root.length).split(sep).filter((s) => s !== "");
 	const out: string[] = [];
 	const walk = (dir: string, idx: number) => {
 		if (out.length >= 200) return;
@@ -1250,7 +1250,7 @@ export function expandGlob(pattern: string, cwd: string): string[] {
 			else if (idx + 1 >= segs.length) out.push(full);
 		}
 	};
-	walk(isAbs ? sep : ".", 0);
+	walk(root || ".", 0);
 	return out;
 }
 
