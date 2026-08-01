@@ -478,7 +478,11 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 	}
 
 	// Automatic save point before every agent turn (git repos only, silent).
+	// Also track the session cwd so argument completions can list real
+	// checkpoint ids (getArgumentCompletions has no ctx of its own).
+	let lastCwd: string | undefined;
 	pi.on("turn_start", async (_event, ctx) => {
+		lastCwd = ctx.cwd;
 		try {
 			await createCheckpoint((cmd, args, opts) => pi.exec(cmd, args, opts), ctx.cwd, "auto", true);
 		} catch {
@@ -545,6 +549,33 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 
 	pi.registerCommand("checkpoint", {
 		description: "Git save points for agent edits: /checkpoint <msg> saves, /checkpoint lists, /checkpoint drop <id|all> removes",
+		getArgumentCompletions: async (prefix) => {
+			const trimmed = prefix.trim();
+			// Second level: "list --full" and "drop <target>" — values replace the
+			// whole argument text, so they carry the subcommand prefix.
+			if (trimmed.startsWith("list")) {
+				const rest = trimmed.slice("list".length).trim();
+				const items = [{ value: "list --full", label: "--full", description: "Show per-checkpoint file lists" }];
+				return items.filter((o) => o.value.startsWith(trimmed) || `${o.value} `.startsWith(trimmed) || rest === "");
+			}
+			if (trimmed.startsWith("drop")) {
+				const rest = trimmed.slice("drop".length).trim();
+				const items = [{ value: "drop all", label: "all", description: "Drop all checkpoints" }];
+				if (lastCwd) {
+					const entries = await listCheckpoints((cmd, args, opts) => pi.exec(cmd, args, opts), lastCwd);
+					for (const e of entries.slice(0, 8)) {
+						items.push({ value: `drop ${e.id}`, label: e.id, description: `${fmtTs(e.ts)} ${e.msg}` });
+					}
+				}
+				return items.filter((o) => o.value.startsWith(trimmed) || `${o.value} `.startsWith(trimmed) || rest === "");
+			}
+			// First level: subcommands (a free-text message gets no completion).
+			const opts = [
+				{ value: "list", label: "list", description: "List checkpoints (default when no args)" },
+				{ value: "drop", label: "drop", description: "Drop checkpoint(s): drop all | drop <id>" },
+			];
+			return opts.filter((o) => o.value.startsWith(trimmed) || `${o.value} `.startsWith(trimmed));
+		},
 		handler: async (args: string, ctx) => {
 			const argv = args.trim().split(/\s+/).filter(Boolean);
 			const exec = (cmd: string, a: string[], opts?: { cwd?: string }) => pi.exec(cmd, a, opts);
@@ -575,6 +606,20 @@ export default async function checkpointExtension(pi: ExtensionAPI): Promise<voi
 
 	pi.registerCommand("restore", {
 		description: "Restore a checkpoint: /restore <id|latest> [--force]",
+		getArgumentCompletions: async (prefix) => {
+			const trimmed = prefix.trim();
+			const items = [
+				{ value: "latest", label: "latest", description: "Most recent checkpoint" },
+				{ value: "--force", label: "--force", description: "Overwrite files changed after the checkpoint" },
+			];
+			if (lastCwd) {
+				const entries = await listCheckpoints((cmd, args, opts) => pi.exec(cmd, args, opts), lastCwd);
+				for (const e of entries.slice(0, 8)) {
+					items.push({ value: e.id, label: e.id, description: `${fmtTs(e.ts)} ${e.msg}` });
+				}
+			}
+			return items.filter((o) => o.value.startsWith(trimmed) || `${o.value} `.startsWith(trimmed));
+		},
 		handler: async (args: string, ctx) => {
 			const argv = args.trim().split(/\s+/).filter(Boolean);
 			const id = argv.find((a) => !a.startsWith("--"));

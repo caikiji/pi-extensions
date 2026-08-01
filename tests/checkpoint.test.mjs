@@ -285,6 +285,42 @@ console.log("Test 16: a staged change after the checkpoint is a conflict");
 	git(["reset", "-q"]);
 }
 
+// ================= Test 17: argument completions =================
+console.log("Test 17: /checkpoint and /restore argument completions");
+{
+	// lastCwd is populated by the turn_start hook (called in Test 9);
+	// make sure it points at TMP so real checkpoint ids are listed.
+	await handlers["turn_start"]({}, { cwd: TMP });
+	const cpCmd = commands["checkpoint"];
+	const rsCmd = commands["restore"];
+	assert(typeof cpCmd.getArgumentCompletions === "function" && typeof rsCmd.getArgumentCompletions === "function", "both commands expose getArgumentCompletions");
+	// empty prefix -> subcommands
+	const empty = await cpCmd.getArgumentCompletions("");
+	assert(Array.isArray(empty) && empty.some((i) => i.value === "list") && empty.some((i) => i.value === "drop"), "empty prefix suggests list + drop");
+	// "list " -> --full
+	const listC = await cpCmd.getArgumentCompletions("list ");
+	assert(Array.isArray(listC) && listC.some((i) => i.value === "list --full"), "list subcommand suggests --full");
+	// "drop " -> all + real ids
+	const dropC = await cpCmd.getArgumentCompletions("drop ");
+	assert(Array.isArray(dropC) && dropC.some((i) => i.value === "drop all"), "drop suggests all");
+	const entries = await mod.listCheckpoints(exec, TMP);
+	if (entries.length > 0) {
+		assert(dropC.some((i) => i.value === `drop ${entries[0].id}`), "drop suggests real checkpoint ids");
+	}
+	// free-text message -> no completion
+	const msgC = await cpCmd.getArgumentCompletions("refactor a");
+	assert(!Array.isArray(msgC) || msgC.length === 0, "free-text message gets no completion");
+	// /restore: latest + --force + real ids
+	const rs = await rsCmd.getArgumentCompletions("");
+	assert(Array.isArray(rs) && rs.some((i) => i.value === "latest") && rs.some((i) => i.value === "--force"), "restore suggests latest + --force");
+	if (entries.length > 0) {
+		assert(rs.some((i) => i.value === entries[0].id), "restore suggests real checkpoint ids");
+	}
+	const rsPrefix = await rsCmd.getArgumentCompletions("la");
+	assert(rsPrefix.some((i) => i.value === "latest"), "restore filters by prefix");
+}
+
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
