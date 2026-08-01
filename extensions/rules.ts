@@ -186,8 +186,8 @@ function lineOf(text: string, offset: number): number {
 
 function displayPath(p: string): string {
   const home = homedir();
-  if (p.startsWith(home)) return "~" + p.slice(home.length);
-  return p;
+  const s = p.startsWith(home) ? "~" + p.slice(home.length) : p;
+  return s.replace(/\\/g, "/"); // normalize Windows separators for agent-facing text
 }
 
 function fmtBytes(n: number): string {
