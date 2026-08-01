@@ -305,6 +305,60 @@ console.log("Test 11: bare dirs at depth limit, filter guard, first-line desc");
 	assert(two?.desc === "First line summary.", `desc is the first docblock line (got ${two?.desc})`);
 }
 
+// ================= Test 12: TS re-export =================
+console.log("Test 12: TS re-export — export { } from / export * from / export * as ns");
+{
+	const src = [
+		'export { a, b } from "./mod1";',
+		'export * from "./mod2";',
+		'export * as ns from "./mod3";',
+		'export type { A } from "./mod4";',
+		"export function real() { return 1; }",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const byName = Object.fromEntries(syms.map((s) => [s.name, s]));
+	assert(syms.length === 5, `5 symbols (4 re-exports + function, got ${syms.length})`);
+	assert(byName["a, b"]?.kind === "re-export" && byName["a, b"].desc === "from ./mod1", "export { a, b } -> name 'a, b', desc 'from ./mod1'");
+	assert(byName["*"]?.kind === "re-export" && byName["*"].desc === "from ./mod2", "export * -> name '*', desc 'from ./mod2'");
+	assert(byName["ns"]?.kind === "re-export" && byName["ns"].desc === "from ./mod3", "export * as ns -> name 'ns'");
+	assert(byName["A"]?.kind === "re-export" && byName["A"].desc === "from ./mod4", "export type { A } -> name 'A'");
+	assert(byName["real"]?.kind === "function", "regular function still extracted");
+}
+
+// ================= Test 13: signature desc for comment-less decls =================
+console.log("Test 13: signature desc — .d.ts-style methods without comments");
+{
+	const src = [
+		"class Api {",
+		"  constructor(options: { url: string }) {",
+		"  }",
+		"  /** Docs. */",
+		"  get state(): string;",
+		"  steer(message: string): void;",
+		"}",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const byName = Object.fromEntries(syms.map((s) => [s.name, s]));
+	assert(byName["constructor"]?.desc === "constructor(options: { url: string })", `constructor desc = signature (got ${byName["constructor"]?.desc})`);
+	assert(byName["state"]?.desc === "Docs.", "docblock wins over signature when present");
+	assert(byName["steer"]?.desc === "steer(message: string): void", `steer desc = signature (got ${byName["steer"]?.desc})`);
+}
+
+// ================= Test 14: confidence note =================
+console.log("Test 14: confidence — low-confidence outlines flagged, normal files not");
+{
+	const unknown = mod.formatOutline({ path: "f.xyz", lang: "unknown", lines: 3, bytes: 10, symbols: [{ name: "chunk", kind: "chunk", line: 1, endLine: 3, depth: 0 }], confidence: "low-confidence: chunk outline (unknown language)" }, {});
+	assert(unknown.includes("low-confidence"), "unknown language outline flagged");
+	const confident = mod.formatOutline({ path: "f.ts", lang: "ts", lines: 10, bytes: 100, symbols: [{ name: "x", kind: "function", line: 1, endLine: 3, depth: 0 }], confidence: "" }, {});
+	assert(!confident.includes("low-confidence"), "confident outline has no note");
+	// skimFile computes confidence from real content
+	writeFileSync(join(TMP, "weird.xyz"), "a\nb\nc\n");
+	const f = mod.skimFile(join(TMP, "weird.xyz"));
+	assert(typeof f.confidence === "string" && f.confidence.includes("low-confidence"), `unknown lang flagged by skimFile (got ${f.confidence})`);
+	const f2 = mod.skimFile(join(TMP, "src", "index.ts"));
+	assert(f2.confidence === "", "normal TS file has empty confidence");
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

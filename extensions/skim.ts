@@ -17,7 +17,9 @@
  * v1 scope: regex-based extraction (no tree-sitter). Braces are balanced with
  * a string/comment-aware scanner; template-literal `${...}` bodies are treated
  * as string content (acceptable approximation). Files > 1 MB are rejected.
- * Unknown extensions fall back to a blank-line chunk outline.
+ * Unknown extensions fall back to a blank-line chunk outline; low-confidence
+ * outlines are flagged in the header so the agent prefers read over trusting
+ * a possibly-incomplete symbol list.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -43,6 +45,7 @@ export interface SkimFile {
 	lines: number;
 	bytes: number;
 	symbols: SkimSymbol[];
+	confidence?: string; // set when the outline is low-confidence (chunk/sparse)
 }
 
 export interface SkimDirEntry {
@@ -83,6 +86,7 @@ interface LangPatterns {
 	kindOf: (m: RegExpMatchArray, line: string) => string;
 	brace: boolean; // balanced-brace spans
 	indented: boolean; // indentation-based spans (python)
+	reexport?: RegExp; // TS/JS re-export: export { a } from, export * from
 }
 
 const METHOD_BLACKLIST =
@@ -94,6 +98,8 @@ function tsPatterns(): LangPatterns {
 		anonDefault: /^export\s+default\s+(?:async\s+)?function\s*\(/,
 		method: /^(?:(?:public|private|protected|static|readonly|async|get|set|\*)\s+)*(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(/,
 		methodBlacklist: METHOD_BLACKLIST,
+		reexport: /^export\s+(?:type\s+)?(?:\*\s+as\s+[A-Za-z_$][\w$]*\s+from\s+|\*\s+from\s+|{[^}]*}\s+from\s+)["'][^"']+["']/,
+
 		nameOf: (m) => m[1],
 		kindOf: (m, line) => {
 			// Strip every leading modifier (export default async ...) so the first
@@ -539,7 +545,7 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 		const indent = indentOf(line);
 		const body = line.trim();
 		if (!body) continue;
-		if (patterns.decl.test(body) || patterns.anonDefault.test(body)) {
+		if (patterns.decl.test(body) || patterns.anonDefault.test(body) || (patterns.reexport?.test(body) ?? false)) {
 			declLines.push({ idx: i, indent });
 			if (indent < minDeclIndent) minDeclIndent = indent;
 		}
@@ -562,6 +568,28 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 			});
 			continue;
 		}
+		// TS/JS re-export: `export { a } from`, `export * from`, `export * as ns from`.
+		if (patterns.reexport?.test(body)) {
+			const mod = body.match(/from\s+["']([^"']+)["']/);
+			const inner = body.replace(/^export\s+(?:type\s+)?/, "").replace(/\s+from\s+["'][^"']+["']\s*;?\s*$/, "").trim();
+			let name: string;
+			if (inner.startsWith("*")) {
+				name = inner.startsWith("* as ") ? inner.slice(5).trim() : "*";
+			} else {
+				name = inner.replace(/^{|}$/g, "").replace(/\s+/g, " ").trim() || "{}";
+			}
+			const endLine = spanFor(lines, i, patterns, 10, true);
+			symbols.push({
+				name,
+				kind: "re-export",
+				line: i + 1,
+				endLine: endLine + 1,
+				depth: 0,
+				desc: mod ? `from ${mod[1]}` : undefined,
+			});
+			continue;
+		}
+
 		const m = body.match(patterns.decl);
 		if (!m) continue;
 		const name = patterns.nameOf(m, body);
@@ -575,7 +603,7 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 			line: i + 1,
 			endLine: endLine + 1,
 			depth: 0,
-			desc: descFor(lines, i),
+			desc: descFor(lines, i) ?? (kind === "function" ? signatureOf(body) : undefined),
 		};
 		symbols.push(sym);
 		if (kind === "class" && patterns.brace) {
@@ -606,7 +634,7 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 				line: i + 1,
 				endLine: endLine + 1,
 				depth: 1,
-				desc: descFor(lines, i),
+				desc: descFor(lines, i) ?? signatureOf(body),
 			});
 			i = endLine; // skip past the method body
 		}
@@ -647,6 +675,13 @@ function descFor(lines: string[], idx: number): string | undefined {
 	if (inline) return inline;
 	return docBlockAbove(lines, idx);
 }
+
+/** Clean signature line for a comment-less desc (e.g. .d.ts methods). */
+function signatureOf(body: string): string | undefined {
+	const sig = body.replace(/\s*\{\s*$/, "").replace(/;\s*$/, "").trim();
+	return sig.length > 0 ? sig : undefined;
+}
+
 
 /** Markdown: headings outside code fences and HTML comments. */
 function extractMarkdown(lines: string[]): SkimSymbol[] {
@@ -826,6 +861,15 @@ export function detectLang(file: string): string {
 	return ext || "unknown";
 }
 
+/** Short confidence note for a file outline; empty string when confident. */
+function confidenceNote(file: SkimFile): string {
+	if (file.lang === "unknown") return "low-confidence: chunk outline (unknown language)";
+	if (file.symbols.length > 0 && file.symbols.every((s) => s.kind === "chunk")) return "low-confidence: chunk outline";
+	if (file.lines >= 100 && file.symbols.length <= 2) return "low-confidence: sparse outline";
+	return "";
+}
+
+
 const MAX_FILE_BYTES = 1024 * 1024;
 
 export function isBinary(buf: Buffer): boolean {
@@ -846,7 +890,8 @@ export function skimFile(file: string): SkimFile {
 	if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	const lang = detectLang(file);
 	const symbols = outlineFor(lines, lang);
-	return { path: file, lang, lines: lines.length, bytes: st.size, symbols };
+	const confidence = confidenceNote({ path: file, lang, lines: lines.length, bytes: st.size, symbols });
+	return { path: file, lang, lines: lines.length, bytes: st.size, symbols, confidence };
 }
 
 // ============================================================================
@@ -1082,6 +1127,7 @@ const KIND_LABEL: Record<string, string> = {
 	heading: "heading",
 	chunk: "chunk",
 	impl: "impl",
+	"re-export": "re-export",
 };
 
 export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: number; filter?: string }): string {
@@ -1103,7 +1149,8 @@ export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: nu
 	const truncated = syms.length > limit;
 	const shown = truncated ? syms.slice(0, limit) : syms;
 
-	const header = `${basename(file.path)} (${file.lines} lines | ${fmtBytes(file.bytes)} | ~${estimateTokens(file.bytes)} tok | ${shown.length} symbol${shown.length === 1 ? "" : "s"})`;
+	const conf = file.confidence ? ` | ${file.confidence}` : "";
+	const header = `${basename(file.path)} (${file.lines} lines | ${fmtBytes(file.bytes)} | ~${estimateTokens(file.bytes)} tok | ${shown.length} symbol${shown.length === 1 ? "" : "s"}${conf})`;
 	const rows = shown.map((s) => {
 		const label = KIND_LABEL[s.kind] ?? s.kind;
 		const prefix = s.depth === 0 ? "|- " : `${"  ".repeat(s.depth)}|- `;

@@ -9,7 +9,7 @@ Personal [pi](https://github.com/earendil-works/pi) extensions.
 | handoff | 按目标提取当前会话关键上下文，生成可编辑的提示词并开新会话。相比 compact：针对性强、可审阅、父会话保留可回溯；交接单聚焦未完成状态与下一步，生成语言跟随目标 |
 | rules | RULES.md 恒真规则管理器：`/rules show` `/rules init` `/rules reload`；`@import` 精细导入（单文件 / `#标题` / glob / 递归 5 层 / 防环去重），`@rules` 可配置参数，`&lt;!-- --&gt;` 注释剥离，结果注入 system prompt；TUI 下 `show` 以可折叠规则树展示（↑↓ 选择，← 折叠 / → 展开 / Enter 切换，叶子为具体规则行，imports / Settings / Diagnostics 默认折叠） |
 | checkpoint | git 存档点：`/checkpoint <msg>` 快照、`/restore <id|latest>` 只还原快照涉及文件（不碰无关改动）、`drop` 清理；冲突保护（你之后改过的文件需 `--force`）；还原前自动存 pre-restore 档可反悔；每轮对话自动存档（保留最近 20 个）；会话不在仓库内时 `checkpoint_list` / `checkpoint_restore` 可用 `repo` 参数指定仓库 |
-| skim | 代码大纲工具（对 agent 的"目录页"）：符号 + 行号 + 行数跨度 + 一句注释，`--read <symbol|行号>` 直达精读，目录模式入口文件优先（depth 越界目录折叠为 `dir/` 条目），支持 glob / filter / json / 按 mtime 缓存；TS / MD / JSON / Python / Go / Rust / Shell 语言支持 |
+| skim | 代码大纲工具（对 agent 的"目录页"）：符号 + 行号 + 行数跨度 + 一句注释（无注释时取签名），TS re-export（`export { } from` / `export * from` / `export * as ns from`）识别，低置信度大纲显式标注防误导，`--read <symbol|行号>` 直达精读，目录模式入口文件优先（depth 越界目录折叠为 `dir/` 条目），支持 glob / filter / json / 按 mtime 缓存；TS / MD / JSON / Python / Go / Rust / Shell 语言支持 |
 
 ## 安装
 
