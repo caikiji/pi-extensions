@@ -1,2 +1,5 @@
 node_modules/
 tests/.work/
+
+# Drafts are user work-in-progress, never commit them
+.pi/handoffs/

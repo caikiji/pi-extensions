@@ -5,12 +5,19 @@
  * for your next task and creates a new session with a generated prompt.
  *
  * Usage:
- *   /handoff now implement this for teams as well
- *   /handoff execute phase one of the plan
- *   /handoff check other places that need this fix
+ *   /handoff                     open a goal editor, then generate + hand off
+ *   /handoff now implement this  generate + hand off directly (fast path)
+ *   /handoff list                browse saved drafts (Enter: actions, Left: back, Esc: cancel)
  *
- * The generated prompt appears as a draft in the editor for review/editing.
+ * The list dialog is a filterable draft picker: type to filter, Enter opens
+ * Load / Edit / Delete, the left arrow goes back one level, Esc cancels.
+ * Delete confirms inline with Cancel as the default focus.
  *
+ * Every successful generation is auto-saved to .pi/handoffs/YYYYMMDD-HHMM.md
+ * (front matter holds goal / created / source session / model), silently.
+ * Cancel the review editor and the draft stays on disk for a later handoff.
+ * Drafts are self-contained, so a draft saved in one session can be handed
+ * off from any other session later.
  * Based on the official pi example (examples/extensions/handoff.ts, v0.83.0).
  * Personal divergences:
  *   1. One-off generation calls use cacheRetention "none" + a fresh sessionId,
@@ -18,13 +25,18 @@
  *   2. The generated prompt is state-focused (unfinished work, uncommitted
  *      changes) and follows the goal's language (code/file names as-is).
  *   3. Generation failures notify the reason instead of showing "Cancelled".
+ *   4. Drafts: auto-save every generation; /handoff list shows a filterable
+ *      picker (type to filter, Left goes back one level, delete confirm
+ *      defaults to Cancel). No pi-tui dependency - dialogs render as plain
+ *      strings, so they work in any runtime.
+ *   5. No-args /handoff opens a goal editor instead of a usage error.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { uuidv7 } from "@earendil-works/pi-ai";
-import { complete, type Message } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import type { Message } from "@earendil-works/pi-ai/compat";
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused handoff prompt that:
 
@@ -51,6 +63,153 @@ Unfinished: ...; uncommitted changes: ... (if any)
 
 ## Task
 [Clear description of what to do next based on user's goal]`;
+
+// ============================================================================
+// Draft store (pure Node - testable without the pi runtime)
+// ============================================================================
+
+export interface HandoffDraftMeta {
+	name: string; // filename, e.g. 20260115-1430.md
+	goal: string; // user goal, single line
+	created: string; // ISO timestamp of the save
+	source: string; // source session file basename
+	model: string; // model id used for generation
+}
+
+export interface HandoffDraft {
+	meta: HandoffDraftMeta;
+	content: string; // generated prompt (front matter stripped)
+	path: string; // absolute path
+}
+
+export function draftsDir(cwd: string): string {
+	return join(cwd, ".pi", "handoffs");
+}
+
+/** Local-time filename stamp, e.g. 20260115-1430 */
+export function timestampName(date: Date): string {
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}`;
+}
+
+/** First free filename: 20260115-1430.md, then -2, -3, ... on collision. */
+export function uniqueDraftName(dir: string, date: Date): string {
+	const base = timestampName(date);
+	let name = `${base}.md`;
+	for (let i = 2; existsSync(join(dir, name)); i++) {
+		name = `${base}-${i}.md`;
+	}
+	return name;
+}
+
+/** Split front matter from content. Returns empty meta when there is none. */
+export function parseFrontMatter(text: string): { meta: Record<string, string>; content: string } {
+	const lines = text.split("\n");
+	if (lines[0] !== "---") return { meta: {}, content: text };
+	const meta: Record<string, string> = {};
+	let i = 1;
+	for (; i < lines.length; i++) {
+		if (lines[i] === "---") break;
+		const idx = lines[i].indexOf(":");
+		if (idx > 0) meta[lines[i].slice(0, idx).trim()] = lines[i].slice(idx + 1).trim();
+	}
+	return { meta, content: lines.slice(i + 1).join("\n") };
+}
+
+export function serializeFrontMatter(meta: HandoffDraftMeta, content: string): string {
+	return [
+		"---",
+		`goal: ${meta.goal}`,
+		`created: ${meta.created}`,
+		`source: ${meta.source}`,
+		`model: ${meta.model}`,
+		"---",
+		content,
+	].join("\n");
+}
+
+/** Guard against path traversal: only plain draft filenames are allowed. */
+function isDraftName(name: string): boolean {
+	return /^[A-Za-z0-9._-]+\.md$/.test(name);
+}
+
+export function readDraft(cwd: string, name: string): HandoffDraft | null {
+	if (!isDraftName(name)) return null;
+	const path = join(draftsDir(cwd), name);
+	if (!existsSync(path)) return null;
+	const { meta, content } = parseFrontMatter(readFileSync(path, "utf8"));
+	return {
+		meta: { name, goal: meta.goal ?? "", created: meta.created ?? "", source: meta.source ?? "", model: meta.model ?? "" },
+		content,
+		path,
+	};
+}
+
+export function writeDraft(cwd: string, name: string, meta: HandoffDraftMeta, content: string): string {
+	const dir = draftsDir(cwd);
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, name);
+	writeFileSync(path, serializeFrontMatter(meta, content), "utf8");
+	return path;
+}
+
+export function deleteDraft(cwd: string, name: string): boolean {
+	if (!isDraftName(name)) return false;
+	const path = join(draftsDir(cwd), name);
+	if (!existsSync(path)) return false;
+	rmSync(path);
+	return true;
+}
+
+/** All drafts, newest first (fallback: by filename when created is missing). */
+export function listDrafts(cwd: string): HandoffDraft[] {
+	const dir = draftsDir(cwd);
+	if (!existsSync(dir)) return [];
+	return readdirSync(dir)
+		.filter((f) => f.endsWith(".md"))
+		.map((f) => readDraft(cwd, f))
+		.filter((d): d is HandoffDraft => d !== null)
+		.sort((a, b) => (b.meta.created || b.meta.name).localeCompare(a.meta.created || a.meta.name));
+}
+
+
+// ============================================================================
+// Command arg parsing (pure - testable)
+// ============================================================================
+// Command arg parsing (pure - testable)
+// ============================================================================
+
+export type HandoffAction = { kind: "goal"; goal: string } | { kind: "list" };
+
+export function parseHandoffArgs(args: string): HandoffAction {
+	const t = args.trim();
+	if (t === "") return { kind: "goal", goal: "" };
+	if (t === "list") return { kind: "list" };
+	return { kind: "goal", goal: t };
+}
+
+// ============================================================================
+// Display helpers
+// ============================================================================
+
+/** ISO timestamp -> "2026-01-15 14:30" (local time). */
+export function formatCreated(iso: string): string {
+	if (!iso) return "";
+	const d = new Date(iso);
+	if (Number.isNaN(d.getTime())) return iso.slice(0, 16) || iso;
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Normalize whitespace and truncate to max chars for single-line display. */
+export function goalLine(goal: string, max = 60): string {
+	const one = goal.replace(/\s+/g, " ").trim();
+	return one.length > max ? one.slice(0, max) : one;
+}
+
+// ============================================================================
+// Extension
+// ============================================================================
 
 function entryToMessage(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
@@ -90,128 +249,453 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 	return compactedBranch.map(entryToMessage).filter((message) => message !== undefined);
 }
 
+
+/** Multi-line metadata block shown under the draft list. */
+function metaLines(d: HandoffDraft): string {
+	return [
+		`goal: ${goalLine(d.meta.goal, 64)}`,
+		`created: ${formatCreated(d.meta.created)}`,
+		`source: ${d.meta.source}`,
+		`model: ${d.meta.model}`,
+	].join("\n");
+}
+
+
+
+/** Generate the handoff prompt with loader UI. Returns null on cancel/failure. */
+async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Promise<string | null> {
+	// Gather conversation context from current branch. If the branch was compacted,
+	// include the compaction summary plus entries from firstKeptEntryId onward.
+	const messages = getHandoffMessages(ctx.sessionManager.getBranch());
+	if (messages.length === 0) {
+		ctx.ui.notify("No conversation to hand off", "error");
+		return null;
+	}
+
+	// pi runtime packages are imported lazily so this module stays importable
+	// from pure Node test files (they never take this path).
+	const [{ convertToLlm, serializeConversation, BorderedLoader }, { complete }, { uuidv7 }] = await Promise.all([
+		import("@earendil-works/pi-coding-agent"),
+		import("@earendil-works/pi-ai/compat"),
+		import("@earendil-works/pi-ai"),
+	]);
+
+	const llmMessages = convertToLlm(messages);
+	const conversationText = serializeConversation(llmMessages);
+
+	// Track failures so the user can distinguish a real error from a manual cancel.
+	let generationError: string | undefined;
+	const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+		const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
+		loader.onAbort = () => done(null);
+
+		const doGenerate = async () => {
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
+			if (!auth.ok || !auth.apiKey) {
+				throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
+			}
+
+			const userMessage: Message = {
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
+					},
+				],
+				timestamp: Date.now(),
+			};
+
+			const response = await complete(
+				ctx.model!,
+				{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+				{
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					env: auth.env,
+					signal: loader.signal,
+					cacheRetention: "none",
+					sessionId: uuidv7(),
+				},
+			);
+
+			if (response.stopReason === "aborted") {
+				return null;
+			}
+
+			return response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+		};
+
+		doGenerate()
+			.then(done)
+			.catch((err) => {
+				console.error("Handoff generation failed:", err);
+				generationError = err instanceof Error ? err.message : String(err);
+				done(null);
+			});
+
+		return loader;
+	});
+
+	if (result === null) {
+		if (generationError) {
+			ctx.ui.notify(`Handoff generation failed: ${generationError}`, "error");
+		} else {
+			ctx.ui.notify("Cancelled", "info");
+		}
+		return null;
+	}
+	return result;
+}
+
+/** Auto-save the generated prompt; returns the repo-relative path for display. */
+function saveDraftFor(ctx: ExtensionCommandContext, goal: string, content: string): string {
+	const dir = draftsDir(ctx.cwd);
+	const now = new Date();
+	const name = uniqueDraftName(dir, now);
+	const sessionFile = ctx.sessionManager.getSessionFile();
+	const meta: HandoffDraftMeta = {
+		name,
+		goal: goal.replace(/\s+/g, " ").trim(),
+		created: now.toISOString(),
+		source: sessionFile ? basename(sessionFile) : "",
+		model: ctx.model?.id ?? "",
+	};
+	writeDraft(ctx.cwd, name, meta, content);
+	return `.pi/handoffs/${name}`;
+}
+
+/** Create the new session with the final prompt staged in the editor. */
+async function startNewSession(ctx: ExtensionCommandContext, prompt: string): Promise<void> {
+	const currentSessionFile = ctx.sessionManager.getSessionFile();
+	const newSessionResult = await ctx.newSession({
+		parentSession: currentSessionFile,
+		withSession: async (replacementCtx) => {
+			replacementCtx.ui.setEditorText(prompt);
+			replacementCtx.ui.notify("Handoff ready. Submit when ready.", "info");
+		},
+	});
+	if (newSessionResult.cancelled) {
+		ctx.ui.notify("New session cancelled", "info");
+	}
+}
+
+/** /handoff [goal]: goal editor when empty, then generate -> auto-save -> review -> hand off. */
+async function handleGoal(ctx: ExtensionCommandContext, goal: string): Promise<void> {
+	if (!ctx.model) {
+		ctx.ui.notify("No model selected", "error");
+		return;
+	}
+
+	if (!goal) {
+		const entered = await ctx.ui.editor("Goal for new thread", "");
+		if (entered === undefined) {
+			return;
+		}
+		goal = entered.trim();
+		if (!goal) {
+			return;
+		}
+	}
+
+	const prompt = await generateHandoff(ctx, goal);
+	if (prompt === null) return;
+
+	saveDraftFor(ctx, goal, prompt);
+
+	const edited = await ctx.ui.editor("Review handoff prompt", prompt);
+	if (edited === undefined) {
+		return;
+	}
+	await startNewSession(ctx, edited);
+}
+
+/** Review a draft in the editor, then hand off with the (possibly edited) text. */
+async function editThenHandoff(ctx: ExtensionCommandContext, draft: HandoffDraft): Promise<void> {
+	const edited = await ctx.ui.editor("Review handoff prompt", draft.content);
+	if (edited === undefined) {
+		ctx.ui.notify("Cancelled", "info");
+		return;
+	}
+	await startNewSession(ctx, edited);
+}
+
+function isPrintable(data: string): boolean {
+	if (data.length === 0) return false;
+	const c = data.charCodeAt(0);
+	return c >= 0x20 && c !== 0x7f;
+}
+
+/** Arrow-key detection without pi-tui: legacy + kitty CSI escape sequences. */
+function isArrow(data: string, dir: "up" | "down" | "left" | "right"): boolean {
+	const letter = { up: "A", down: "B", right: "C", left: "D" }[dir];
+	return new RegExp(String.raw`^\x1b\[[0-9;]*${letter}$`).test(data);
+}
+
+/**
+ * Draft picker: filterable list with a metadata pane. Enter opens the
+ * Load / Edit / Delete menu; the left arrow goes back one level (menu ->
+ * list, delete-confirm -> menu); Esc cancels everything. Delete confirms
+ * inline with Cancel as the default focus. Pure string rendering - no
+ * pi-tui dependency, so it runs in any runtime.
+ */
+export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: HandoffDraft[]): Promise<string | null> {
+	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+		type Mode = "browse" | "menu" | "confirmDelete";
+		let mode: Mode = "browse";
+		let index = 0;
+		let menuIndex = 0; // 0 Load, 1 Edit, 2 Delete
+		let confirmIndex = 0; // 0 Cancel (default), 1 Delete
+		let filter = "";
+
+		const MAX_ROWS = 10;
+
+		// match goal + filename without the .md extension (so a bare letter like "d"
+		// doesn't match every filename)
+		const visible = () =>
+			drafts.filter((d) => !filter || `${d.meta.name.slice(0, -3)} ${d.meta.goal}`.toLowerCase().includes(filter));
+
+		const clampIndex = (i: number, len: number) => (len === 0 ? 0 : Math.min(Math.max(i, 0), len - 1));
+
+		/**
+		 * Fit a line to the terminal: truncate by visible width (wide chars count
+		 * as 2), pad to exactly `width`, and only then apply the color so ANSI
+		 * escapes are never cut mid-sequence. Guarantees visibleWidth <= width,
+		 * which the TUI enforces for every rendered line.
+		 */
+		function fit(text: string, width: number, color?: (s: string) => string): string {
+			let visible = 0;
+			let cut = text.length;
+			for (let i = 0; i < text.length; i++) {
+				const w = text.codePointAt(i)! > 0x2e7f ? 2 : 1;
+				if (visible + w > width) {
+					cut = i;
+					break;
+				}
+				visible += w;
+			}
+			const t = cut < text.length ? text.slice(0, cut) : text;
+			const padded = visible < width ? t + " ".repeat(width - visible) : t;
+			return color ? color(padded) : padded;
+		}
+
+		function render(width: number): string[] {
+			const list = visible();
+			const total = list.length;
+			const lines: string[] = [];
+			if (mode === "browse") {
+				const title = filter ? `Saved handoff drafts (${total}) filter: ${filter}` : `Saved handoff drafts (${total})`;
+				lines.push(fit(title, width, (s) => theme.fg("accent", s)));
+				if (total === 0) {
+					lines.push(fit("(no match)", width, (s) => theme.fg("muted", s)));
+				} else {
+					const start = Math.max(0, Math.min(index - Math.floor(MAX_ROWS / 2), Math.max(0, total - MAX_ROWS)));
+					for (let i = start; i < Math.min(total, start + MAX_ROWS); i++) {
+						const d = list[i];
+						const row = `${i + 1} | ${formatCreated(d.meta.created)} | ${goalLine(d.meta.goal, 40)}`;
+						lines.push(i === index ? fit(`> ${row}`, width, (s) => theme.fg("accent", s)) : fit(`  ${row}`, width));
+					}
+					if (total > MAX_ROWS) {
+						lines.push(fit(`  ... ${total - MAX_ROWS} more`, width, (s) => theme.fg("dim", s)));
+					}
+					lines.push("");
+					const d = list[index];
+					if (d) {
+						for (const metaLine of metaLines(d).split("\n")) {
+							lines.push(fit(metaLine, width, (s) => theme.fg("dim", s)));
+						}
+					}
+				}
+				lines.push(fit("type: filter | enter: actions | esc: cancel", width, (s) => theme.fg("dim", s)));
+			} else if (mode === "menu") {
+				const d = list[index];
+				lines.push(fit(d ? `Draft ${d.meta.name}` : "", width, (s) => theme.fg("accent", s)));
+				const names = ["Load", "Edit", "Delete"];
+				for (let i = 0; i < names.length; i++) {
+					lines.push(i === menuIndex ? fit(`> ${names[i]}`, width, (s) => theme.fg("accent", s)) : fit(`  ${names[i]}`, width));
+				}
+				lines.push(fit("enter: select | left: back | esc: cancel", width, (s) => theme.fg("dim", s)));
+			} else {
+				const d = list[index];
+				lines.push(fit(d ? `Delete draft ${d.meta.name}?` : "Delete draft?", width, (s) => theme.fg("accent", s)));
+				for (let i = 0; i < 2; i++) {
+					const label = i === 0 ? "Cancel" : "Delete";
+					lines.push(i === confirmIndex ? fit(`> ${label}`, width, (s) => theme.fg("accent", s)) : fit(`  ${label}`, width));
+				}
+				lines.push(fit("enter: confirm | left: back | esc: cancel", width, (s) => theme.fg("dim", s)));
+			}
+			return lines;
+		}
+
+		function refresh() {
+			tui.requestRender();
+		}
+
+		function currentDraft(): HandoffDraft | undefined {
+			return visible()[index];
+		}
+
+		function handleInput(data: string) {
+			if (mode === "browse") {
+				const len = visible().length;
+				if (data === "\r" || data === "\n") {
+					if (len > 0) {
+						mode = "menu";
+						menuIndex = 0;
+						refresh();
+					}
+					return;
+				}
+				if (data === "\x1b") {
+					done(null);
+					return;
+				}
+				if (data === "\x7f" || data === "\x08") {
+					filter = filter.slice(0, -1);
+					index = clampIndex(index, visible().length);
+					refresh();
+					return;
+				}
+				if (isPrintable(data)) {
+					filter += data.toLowerCase();
+					index = 0;
+					refresh();
+					return;
+				}
+				if (isArrow(data, "up")) {
+					index = clampIndex(index - 1, len);
+					refresh();
+					return;
+				}
+				if (isArrow(data, "down")) {
+					index = clampIndex(index + 1, len);
+					refresh();
+					return;
+				}
+				return;
+			}
+			if (mode === "menu") {
+				const d = currentDraft();
+				if (!d) return;
+				if (data === "\r" || data === "\n") {
+					if (menuIndex === 2) {
+						mode = "confirmDelete";
+						confirmIndex = 0;
+						refresh();
+						return;
+					}
+					done(`${menuIndex === 0 ? "load" : "edit"}:${d.meta.name}`);
+					return;
+				}
+				if (isArrow(data, "left")) {
+					mode = "browse";
+					refresh();
+					return;
+				}
+				if (data === "\x1b") {
+					done(null);
+					return;
+				}
+				if (isArrow(data, "up")) {
+					menuIndex = (menuIndex + 2) % 3;
+					refresh();
+					return;
+				}
+				if (isArrow(data, "down")) {
+					menuIndex = (menuIndex + 1) % 3;
+					refresh();
+					return;
+				}
+				return;
+			}
+			// confirmDelete
+			const d2 = currentDraft();
+			if (!d2) return;
+			if (data === "\r" || data === "\n") {
+				if (confirmIndex === 1) {
+					done(`delete:${d2.meta.name}`);
+				} else {
+					mode = "menu";
+					refresh();
+				}
+				return;
+			}
+			if (isArrow(data, "left")) {
+				mode = "menu";
+				refresh();
+				return;
+			}
+			if (data === "\x1b") {
+				done(null);
+				return;
+			}
+			if (isArrow(data, "up") || isArrow(data, "down")) {
+				confirmIndex = 1 - confirmIndex;
+				refresh();
+				return;
+			}
+		}
+
+		return { render, invalidate: () => {}, handleInput };
+	});
+}
+/** /handoff list: pick a draft, then Load / Edit / Delete. */
+async function handleList(ctx: ExtensionCommandContext): Promise<void> {
+	const drafts = listDrafts(ctx.cwd);
+	if (drafts.length === 0) {
+		ctx.ui.notify("No drafts saved yet", "info");
+		return;
+	}
+
+	const chosen = await showDraftPicker(ctx, drafts);
+	if (chosen === null) return;
+	const colon = chosen.indexOf(":");
+	const op = chosen.slice(0, colon);
+	const name = chosen.slice(colon + 1);
+	const draft = readDraft(ctx.cwd, name);
+	if (!draft) {
+		ctx.ui.notify(`Draft not found: ${name}`, "error");
+		return;
+	}
+
+	if (op === "load") {
+		await editThenHandoff(ctx, draft);
+		return;
+	}
+	if (op === "edit") {
+		const edited = await ctx.ui.editor(`Edit draft: ${draft.meta.name}`, draft.content);
+		if (edited === undefined) return;
+		writeDraft(ctx.cwd, draft.meta.name, draft.meta, edited);
+		ctx.ui.notify(`Draft updated: ${draft.meta.name}`, "info");
+		return;
+	}
+	// delete - already confirmed inline with Cancel as the default focus
+	if (deleteDraft(ctx.cwd, draft.meta.name)) {
+		ctx.ui.notify(`Deleted: ${draft.meta.name}`, "info");
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("handoff", {
-		description: "Transfer context to a new focused session",
+		description: "Transfer context to a new focused session (subcommands: list)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("handoff requires interactive mode", "error");
 				return;
 			}
 
-			if (!ctx.model) {
-				ctx.ui.notify("No model selected", "error");
-				return;
-			}
-
-			const goal = args.trim();
-			if (!goal) {
-				ctx.ui.notify("Usage: /handoff <goal for new thread>", "error");
-				return;
-			}
-
-			// Gather conversation context from current branch. If the branch was compacted,
-			// include the compaction summary plus entries from firstKeptEntryId onward.
-			const messages = getHandoffMessages(ctx.sessionManager.getBranch());
-
-			if (messages.length === 0) {
-				ctx.ui.notify("No conversation to hand off", "error");
-				return;
-			}
-
-			// Convert to LLM format and serialize
-			const llmMessages = convertToLlm(messages);
-			const conversationText = serializeConversation(llmMessages);
-			const currentSessionFile = ctx.sessionManager.getSessionFile();
-
-			// Generate the handoff prompt with loader UI. Track failures so the
-			// user can distinguish a real error from a manual cancel.
-			let generationError: string | undefined;
-			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
-				loader.onAbort = () => done(null);
-
-				const doGenerate = async () => {
-					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-					if (!auth.ok || !auth.apiKey) {
-						throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
-					}
-
-					const userMessage: Message = {
-						role: "user",
-						content: [
-							{
-								type: "text",
-								text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
-							},
-						],
-						timestamp: Date.now(),
-					};
-
-					const response = await complete(
-						ctx.model!,
-						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{
-							apiKey: auth.apiKey,
-							headers: auth.headers,
-							env: auth.env,
-							signal: loader.signal,
-							cacheRetention: "none",
-							sessionId: uuidv7(),
-						},
-					);
-
-					if (response.stopReason === "aborted") {
-						return null;
-					}
-
-					return response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-				};
-
-				doGenerate()
-					.then(done)
-					.catch((err) => {
-						console.error("Handoff generation failed:", err);
-						generationError = err instanceof Error ? err.message : String(err);
-						done(null);
-					});
-
-				return loader;
-			});
-
-			if (result === null) {
-				if (generationError) {
-					ctx.ui.notify(`Handoff generation failed: ${generationError}`, "error");
+			try {
+				const action = parseHandoffArgs(args);
+				if (action.kind === "goal") {
+					await handleGoal(ctx, action.goal);
 				} else {
-					ctx.ui.notify("Cancelled", "info");
+					await handleList(ctx);
 				}
-				return;
-			}
-
-			// Let user edit the generated prompt
-			const editedPrompt = await ctx.ui.editor("Edit handoff prompt", result);
-
-			if (editedPrompt === undefined) {
-				ctx.ui.notify("Cancelled", "info");
-				return;
-			}
-
-			// Create new session with parent tracking. Use the replacement-session
-			// context for post-switch UI work; the original ctx is stale after a
-			// successful session replacement.
-			const newSessionResult = await ctx.newSession({
-				parentSession: currentSessionFile,
-				withSession: async (replacementCtx) => {
-					replacementCtx.ui.setEditorText(editedPrompt);
-					replacementCtx.ui.notify("Handoff ready. Submit when ready.", "info");
-				},
-			});
-
-			if (newSessionResult.cancelled) {
-				ctx.ui.notify("New session cancelled", "info");
+			} catch (err) {
+				ctx.ui.notify(`handoff error: ${err instanceof Error ? err.message : String(err)}`, "error");
 			}
 		},
 	});
