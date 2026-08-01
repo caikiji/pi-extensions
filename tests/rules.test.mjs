@@ -246,14 +246,21 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   assert(g.includes("max depth 1 exceeded"), "subtree limit applied inside sub.md");
 }
 
-// ================= Test 13: /rules show — preview + guard paths =================
+// ================= Test 13: /rules show — tree window + guard paths =================
 {
-  // buildPreviewBlocks: report first, then expanded content per source
+  // buildRuleTree: sources as roots, settings/diagnostics as extra collapsed nodes
   const fakeExp = {
     cwd: TMP,
     sources: [
-      { path: "~/agent-dir/RULES.md", kind: "global", lines: 3, bytes: 9, content: "- global rule", imports: [] },
-      { path: "RULES.md", kind: "project", lines: 12, bytes: 31, content: "- rule A\n@import expanded\n- rule B", imports: [{ spec: "docs/x.md", status: "ok", detail: "whole file", bytes: 22 }] },
+      { path: "~/agent-dir/RULES.md", kind: "global", lines: 3, bytes: 9, content: "- global rule", imports: [], tree: [{ id: "src:~/agent-dir/RULES.md/rules", kind: "content", label: "Rules (1)", lines: ["- global rule"] }] },
+      { path: "RULES.md", kind: "project", lines: 12, bytes: 31, content: "- rule A\n@import expanded\n- rule B", imports: [{ spec: "docs/x.md", status: "ok", detail: "whole file", bytes: 22 }], tree: [
+        { id: "src:RULES.md/rules", kind: "content", label: "Rules (2)", lines: ["- rule A", "- rule B"] },
+        { id: "src:RULES.md/imp:0", kind: "import", label: "@import docs/x.md", status: "ok", meta: "whole file · 22 B", children: [{ id: "src:RULES.md/imp:0/rules", kind: "content", label: "Rules (1)", lines: ["- imported rule"] }] },
+        { id: "src:RULES.md/imp:1", kind: "import", label: "@import docs/patterns/*.md", status: "ok", meta: "2 files · 45 B", children: [
+          { id: "src:RULES.md/imp:1/f:0", kind: "import", label: "patterns/one.md", meta: "20 B", children: [{ id: "src:RULES.md/imp:1/f:0/rules", kind: "content", label: "Rules (1)", lines: ["- p1"] }] },
+          { id: "src:RULES.md/imp:1/f:1", kind: "import", label: "patterns/two.md", meta: "25 B", children: [{ id: "src:RULES.md/imp:1/f:1/rules", kind: "content", label: "Rules (1)", lines: ["- p2"] }] },
+        ] },
+      ] },
     ],
     diagnostics: [{ level: "warning", message: 'RULES.md: unknown @rules key "bogus"' }],
     totalBytes: 40,
@@ -262,64 +269,91 @@ console.log("Test 12: @rules in imported files affects only their subtree");
     settings: [{ source: "RULES.md", key: "max_depth", value: "2" }],
     fileStats: new Map(),
   };
-  const blocks = mod.buildPreviewBlocks(fakeExp);
-  const all = blocks.segments.flatMap((s) => s.lines).join("\n");
-  assert(blocks.title.includes("2 file(s) · 40 B · ~10 tokens"), "preview title shows stats");
-  // report segment first (dim), without the duplicate "Rules:" stats line
-  const reportSeg = blocks.segments[0];
-  assert(reportSeg.style === "dim", "report segment styled dim");
-  assert(!all.includes("Rules: 2 file(s)"), "stats line dropped (title carries it)");
-  assert(reportSeg.lines[0].startsWith("limits:"), "report leads with limits");
-  assert(all.includes("✓ @import docs/x.md — whole file · 22 B"), "import status in report");
-  assert(all.includes("Settings (from RULES.md):") && all.includes("⚙ max_depth = 2 (RULES.md)"), "settings in report");
-  assert(all.includes("Diagnostics:") && all.includes('unknown @rules key "bogus"'), "diagnostics in report");
-  assert(all.includes("0 error(s) · 1 warning(s)"), "summary line present");
-  // content segments: plain content only (report above carries attribution)
-  const plain = blocks.segments.filter((s) => s.style === "plain");
-  assert(plain.some((s) => s.lines.includes("- global rule")), "global content shown");
-  assert(plain.some((s) => s.lines.includes("@import expanded")), "expanded content shown (imports inlined)");
-  assert(mod.buildPreviewBlocks(undefined).segments.length === 0, "no rules → empty blocks");
+  const tree = mod.buildRuleTree(fakeExp);
+  assert(tree.title.includes("2 file(s) · 40 B · ~10 tokens"), "tree title shows stats");
+  assert(tree.header[0].startsWith("limits:"), "header leads with limits");
+  assert(tree.roots.length === 4, "roots = 2 sources + settings + diagnostics");
+  assert(tree.roots[1].label === "[project] RULES.md", "source node label carries kind + path");
+  assert(tree.roots[2].kind === "settings" && tree.roots[2].lines[0] === "max_depth = 2 (RULES.md)", "settings node leaves");
+  assert(tree.roots[3].kind === "diagnostics" && tree.roots[3].lines[0].includes('unknown @rules key "bogus"'), "diagnostics node leaves");
+  assert(mod.buildRuleTree(undefined).roots.length === 0, "no rules → empty tree");
 
-  // makePreviewWindow: styled segments, borders, scrolling, clamp, close
+  // makeRuleTreeWindow: borders, header, tree lines, fold/unfold, selection, close
   const fgCalls = [];
   const fakeTheme = { fg: (name, s) => { fgCalls.push(name); return s; } };
   const fakeTruncate = (t, w) => t.slice(0, w);
   const fakeVW = (t) => t.length;
   const fakeMK = (data, key) => data === key;
-  const keys = { up: "up", down: "down", pageUp: "pageUp", pageDown: "pageDown", home: "home", end: "end", escape: "escape" };
+  const keys = { up: "up", down: "down", pageUp: "pageUp", pageDown: "pageDown", home: "home", end: "end", fold: "left", unfold: "right", toggle: "enter", escape: "escape" };
   let renders = 0;
   let doneCalled = false;
   const tui = { terminal: { rows: 40 }, requestRender: () => { renders++; } };
-  const wlines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
-  const segs = [
-    { style: "dim", lines: ["meta 1", "meta 2"] },
-    { style: "plain", lines: wlines },
-  ];
-  const win = mod.makePreviewWindow(tui, fakeTheme, () => { doneCalled = true; }, "T", segs, fakeTruncate, fakeVW, fakeMK, keys, false);
-  const out = win.render(60);
+  const win = mod.makeRuleTreeWindow(tui, fakeTheme, () => { doneCalled = true; }, tree, fakeTruncate, fakeVW, fakeMK, keys, false);
+  let out = win.render(60);
+  const flatText = out.join("\n");
   assert(out[0].startsWith("┌─") && out[0].endsWith("┐"), "top border with title");
   assert(out[out.length - 1].startsWith("└─") && out[out.length - 1].endsWith("┘"), "bottom border with status");
-  assert(out[1].startsWith("│") && out[1].endsWith("│"), "content rows bordered");
-  assert(out[1].includes("meta 1"), "first line is the report segment");
-  assert(out[3].includes("line 0"), "first content line shown");
-  assert(out.length === 32, "window height = contentHeight + 2 borders (30+2)");
+  assert(out[1].includes("limits:"), "header line above the tree");
+  assert(out[2].includes("[global] ~/agent-dir/RULES.md"), "first tree line is the global source");
+  assert(out.length === 32, "window height = header + treeHeight + 2 borders");
   assert(fgCalls.includes("dim") && fgCalls.includes("accent"), "dim/accent styles applied");
+  // default state: sources + Rules open, imports/settings/diagnostics collapsed
+  assert(flatText.includes("- rule A") && flatText.includes("- rule B"), "inline rules visible by default");
+  assert(flatText.includes("+ @import docs/x.md") && flatText.includes("+ @import docs/patterns/*.md"), "imports collapsed by default");
+  assert(flatText.includes("+ Settings (1)") && flatText.includes("+ Diagnostics (1)"), "settings/diagnostics collapsed");
 
+  // selection moves with up/down (footer shows sel+1 / total)
+  assert(out[out.length - 1].includes("1 / 11"), "initial selection is the first line");
   win.handleInput("down");
-  assert(renders === 1, "scroll triggers requestRender");
-  assert(win.render(60)[3].includes("line 1"), "down scrolls one line");
+  assert(win.render(60)[out.length - 1].includes("2 / 11"), "down moves selection");
+  win.handleInput("down");
+  win.handleInput("down");
+  win.handleInput("down");
+  win.handleInput("down");
+  win.handleInput("down");
+  win.handleInput("down");
+  out = win.render(60);
+  assert(out[out.length - 1].includes("8 / 11"), "selection reaches the import node");
+  win.handleInput("right"); // unfold
+  out = win.render(60);
+  assert(out[out.length - 1].includes("8 / 13"), "unfold grows the tree");
+  assert(out.join("\n").includes("- @import docs/x.md"), "import now expanded");
+  win.handleInput("left"); // fold again
+  assert(win.render(60)[out.length - 1].includes("8 / 11"), "fold shrinks the tree back");
+
   win.handleInput("end");
-  assert(win.render(60)[3].includes("line 22"), "end clamps to last viewport (52-30)");
+  assert(win.render(60)[out.length - 1].includes("11 / 11"), "end jumps to the last line");
   win.handleInput("home");
-  assert(win.render(60)[3].includes("line 0"), "home jumps to top");
+  assert(win.render(60)[out.length - 1].includes("1 / 11"), "home jumps back to the top");
   win.handleInput("up");
-  assert(win.render(60)[3].includes("line 0"), "up at top clamps");
+  assert(win.render(60)[out.length - 1].includes("1 / 11"), "up at top clamps");
   win.handleInput("escape");
   assert(doneCalled, "escape closes window");
 
+  // toggle (enter) expands a collapsed node
+  const win2 = mod.makeRuleTreeWindow(tui, fakeTheme, () => {}, tree, fakeTruncate, fakeVW, fakeMK, keys, false);
+  win2.handleInput("down");
+  win2.handleInput("down");
+  win2.handleInput("down");
+  win2.handleInput("down");
+  win2.handleInput("down");
+  win2.handleInput("down");
+  win2.handleInput("down");
+  assert(win2.render(60).join("\n").includes("+ @import docs/x.md"), "second window: import still collapsed");
+  win2.handleInput("enter");
+  assert(win2.render(60).join("\n").includes("- @import docs/x.md"), "enter expands the node");
+  win2.handleInput("enter");
+  assert(win2.render(60).join("\n").includes("+ @import docs/x.md"), "enter collapses the node again");
+
+  // glob imports: each matched file is a path-labeled child node
+  win2.handleInput("down"); // move to the glob import
+  win2.handleInput("right"); // unfold it
+  const globView = win2.render(60).join("\n");
+  assert(globView.includes("+ patterns/one.md") && globView.includes("+ patterns/two.md"), "glob children carry per-file paths");
+
   // handler guard paths
   let n;
-  // outside the TUI: falls back to the text report (what list used to print)
+  // outside the TUI: falls back to the text report
   await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; } }, reload: async () => {} });
   assert(n[0] === "info" && n[1].includes("Rules: 1 file(s)"), "show outside TUI → text report");
 

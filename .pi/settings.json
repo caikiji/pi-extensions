@@ -1,4 +1,5 @@
 {
+  "defaultModel": "deepseek-v4-flash",
   "packages": [
     "git:github.com/caikiji/pi-extensions@main"
   ]

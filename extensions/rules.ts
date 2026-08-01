@@ -142,6 +142,8 @@ interface SourceInfo {
   /** Expanded text: comments stripped, @imports inlined. What /rules show displays. */
   content: string;
   imports: ImportInfo[];
+  /** Structural tree mirroring the expanded content: content nodes + import nodes. */
+  tree: RuleTreeNode[];
 }
 
 interface Expansion {
@@ -155,10 +157,27 @@ interface Expansion {
   fileStats: Map<string, string | null>; // canonical path -> stat key (null = missing) of every referenced file
 }
 
+export type RuleTreeNodeKind = "source" | "import" | "content" | "settings" | "diagnostics";
+
+/**
+ * One node of the /rules show tree. `children` are structural nodes (imports);
+ * `lines` are leaf rule lines shown verbatim. A node is expandable when it has
+ * either children or lines.
+ */
+export interface RuleTreeNode {
+  /** Stable, deterministic id (path-based) — fold state is keyed on it. */
+  id: string;
+  kind: RuleTreeNodeKind;
+  label: string; // pure ASCII
+  status?: "ok" | "error" | "warning";
+  meta?: string; // right-side detail, e.g. "whole file · 1.2 KB"
+  lines?: string[]; // leaf content (kind: content/settings/diagnostics)
+  children?: RuleTreeNode[];
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
-
 function stripBom(s: string): string {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
 }
@@ -450,6 +469,30 @@ function globMatch(pattern: string, baseDir: string): { files: string[] } {
 // Import expansion
 // ============================================================================
 
+function makeContentNode(id: string, rawLines: string[]): RuleTreeNode | undefined {
+  const lines = rawLines.filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return undefined;
+  return { id, kind: "content", label: `Rules (${lines.length})`, lines };
+}
+
+/**
+ * Label glob-matched files relative to their common ancestor directory, so
+ * the unique tail (the filename) survives right-side truncation in the tree.
+ */
+function sharedDirLabel(files: string[]): (f: string) => string {
+  if (files.length <= 1) return (f) => displayPath(f);
+  const parts = files.map((f) => displayPath(f).split("/"));
+  let i = 0;
+  const minLen = Math.min(...parts.map((p) => p.length));
+  while (i < minLen && parts.every((p) => p[i] === parts[0][i])) i++;
+  const base = parts[0].slice(0, i).join("/");
+  return (f) => {
+    const d = displayPath(f);
+    return base.length > 0 && d.startsWith(base + "/") ? d.slice(base.length + 1) : d;
+  };
+}
+
+
 function processDirectives(
   lines: string[],
   sourceFile: string,
@@ -463,22 +506,34 @@ function processDirectives(
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
+  tree: RuleTreeNode[], // children of the current file node
+  treeId: string, // id prefix for nodes built here
+  seq: { n: number }, // import ordinal counter
 ): void {
   let inFence = false;
+  const pending: string[] = [];
+  const flush = () => {
+    const node = makeContentNode(`${treeId}/rules:${seq.n}`, pending);
+    pending.length = 0;
+    if (node) tree.push(node);
+  };
   for (const raw of lines) {
     const line = raw.replace(/\r$/, "");
     if (/^\s*(```+|~~~+)/.test(line)) {
       inFence = !inFence;
       out.push(line);
+      pending.push(line);
       continue;
     }
     if (inFence) {
       out.push(line);
+      pending.push(line);
       continue;
     }
     const esc = /^(\s*)\\(@\w+.*)$/.exec(line);
     if (esc) {
       out.push(esc[1] + esc[2]); // literal, backslash dropped
+      pending.push(esc[1] + esc[2]);
       continue;
     }
     const rules = /^(\s*)@rules\s+(.+?)\s*$/.exec(line);
@@ -489,10 +544,15 @@ function processDirectives(
     const m = /^(\s*)@import\s+(.+?)\s*$/.exec(line);
     if (!m) {
       out.push(line);
+      pending.push(line);
       continue;
     }
-    expandImport(m[2], sourceFile, baseDir, depth, stack, imported, fileStats, config, settings, out, imports, diagnostics);
+    flush(); // keep inline rules ordered before each import
+    const node = expandImport(m[2], sourceFile, baseDir, depth, stack, imported, fileStats, config, settings, out, imports, diagnostics, `${treeId}/imp:${seq.n}`);
+    seq.n++;
+    if (node) tree.push(node);
   }
+  flush();
 }
 
 function expandImport(
@@ -508,7 +568,8 @@ function expandImport(
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
-): void {
+  nodeId: string, // id of the import node itself
+): RuleTreeNode | undefined {
   const hashIdx = spec.indexOf("#");
   const pathPart = (hashIdx === -1 ? spec : spec.slice(0, hashIdx)).trim();
   const anchor = hashIdx === -1 ? undefined : spec.slice(hashIdx + 1).trim();
@@ -521,7 +582,7 @@ function expandImport(
       diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} — glob matched no files` });
       imports.push({ spec, status: "warning", detail: "glob matched no files", bytes: 0 });
       out.push(`[rules] skipped: ${spec} (glob matched no files)`);
-      return;
+      return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "warning", meta: "glob matched no files" };
     }
     if (files.length > config.maxGlobFiles) {
       diagnostics.push({
@@ -530,13 +591,25 @@ function expandImport(
       });
     }
     let total = 0;
-    for (const f of files) {
-      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile);
+    const childNodes: RuleTreeNode[] = [];
+    const relLabel = sharedDirLabel(files);
+    for (let fi = 0; fi < files.length; fi++) {
+      const f = files[fi];
+      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile, `${nodeId}/f:${fi}`);
       if (r.ok) {
         out.push(r.text);
         total += r.bytes;
+        // one node per matched file: keeps attribution when the glob spans files
+        const node: RuleTreeNode = { id: `${nodeId}/f:${fi}`, kind: "import", label: relLabel(f), meta: fmtBytes(r.bytes) };
+        if (anchor !== undefined) {
+          node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+        } else {
+          node.children = r.children;
+        }
+        childNodes.push(node);
       } else {
         out.push(`[rules] skipped: ${spec} → ${displayPath(f)} (${r.reason})`);
+        childNodes.push({ id: `${nodeId}/f:${fi}`, kind: "import", label: relLabel(f), status: "error", meta: r.reason });
       }
     }
     imports.push({
@@ -545,19 +618,27 @@ function expandImport(
       detail: `${files.length} file${files.length > 1 ? "s" : ""}`,
       bytes: total,
     });
-    return;
+    const status = total > 0 ? (files.length > config.maxGlobFiles ? "warning" : "ok") : "error";
+    return { id: nodeId, kind: "import", label: `@import ${spec}`, status, meta: `${files.length} file${files.length > 1 ? "s" : ""} · ${fmtBytes(total)}`, children: childNodes };
   }
 
   const p = resolveImportPath(pathPart, baseDir);
   fileStats.set(resolve(p), statKey(p));
-  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile);
+  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile, nodeId);
   if (r.ok) {
     out.push(r.text);
     imports.push({ spec, status: "ok", detail: anchor ? "section" : "whole file", bytes: r.bytes });
-  } else {
-    imports.push({ spec, status: "error", detail: r.reason, bytes: 0 });
-    out.push(`[rules] skipped: ${spec} (${r.reason})`);
+    const node: RuleTreeNode = { id: nodeId, kind: "import", label: `@import ${spec}`, status: "ok", meta: `${anchor ? "section" : "whole file"} · ${fmtBytes(r.bytes)}` };
+    if (anchor !== undefined) {
+      node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    } else {
+      node.children = r.children;
+    }
+    return node;
   }
+  imports.push({ spec, status: "error", detail: r.reason, bytes: 0 });
+  out.push(`[rules] skipped: ${spec} (${r.reason})`);
+  return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "error", meta: r.reason };
 }
 
 function expandFile(
@@ -571,7 +652,8 @@ function expandFile(
   settings: AppliedSetting[],
   diagnostics: Diagnostic[],
   sourceFile: string,
-): { ok: true; text: string; bytes: number } | { ok: false; reason: string } {
+  nodeId: string, // id prefix for this file's subtree
+): { ok: true; text: string; bytes: number; children: RuleTreeNode[] } | { ok: false; reason: string } {
   const canonical = resolve(p);
   fileStats.set(canonical, statKey(canonical));
   // settings inside an imported file affect only its own subtree
@@ -605,13 +687,14 @@ function expandFile(
       diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} — section not found` });
       return { ok: false, reason: `section "#${anchor}" not found` };
     }
-    return { ok: true, text: slice, bytes: slice.length };
+    return { ok: true, text: slice, bytes: slice.length, children: [] };
   }
 
   stack.add(canonical);
   imported.add(canonical);
   const out: string[] = [];
   const nestedImports: ImportInfo[] = [];
+  const children: RuleTreeNode[] = [];
   processDirectives(
     noComments.split("\n"),
     sourceFile,
@@ -625,10 +708,13 @@ function expandFile(
     out,
     nestedImports,
     diagnostics,
+    children,
+    nodeId,
+    { n: 0 },
   );
   stack.delete(canonical);
   const text = out.join("\n");
-  return { ok: true, text, bytes: text.length };
+  return { ok: true, text, bytes: text.length, children };
 }
 
 function specLabel(p: string, anchor: string | undefined): string {
@@ -676,6 +762,7 @@ function computeExpansion(cwd: string): Expansion {
 
     const out: string[] = [];
     const imports: ImportInfo[] = [];
+    const tree: RuleTreeNode[] = [];
     processDirectives(
       noComments.split("\n"),
       displayPath(c.path),
@@ -689,12 +776,15 @@ function computeExpansion(cwd: string): Expansion {
       out,
       imports,
       diagnostics,
+      tree,
+      `src:${displayPath(c.path)}`,
+      { n: 0 },
     );
     // Trim leading/trailing blank lines left behind by stripped comments
     // (a removed <!-- ... --> line still leaves its newline).
     const content = out.join("\n").trim();
     const lines = raw.split(/\r?\n/).length;
-    sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, content, imports });
+    sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, content, imports, tree });
     blocks.push(`<rules_source path="${displayPath(c.path)}">\n${content}\n</rules_source>`);
     totalBytes += content.length;
   }
@@ -785,95 +875,158 @@ function buildReport(exp: Expansion | undefined): string[] {
 type PreviewDone = (result?: unknown) => void;
 type PreviewMatchesKey = (data: string, key: KeyId) => boolean;
 type PreviewTruncate = (text: string, maxWidth: number, ellipsis?: string, pad?: boolean) => string;
-interface PreviewKeys {
+interface RuleTreeKeys {
   up: KeyId;
   down: KeyId;
   pageUp: KeyId;
   pageDown: KeyId;
   home: KeyId;
   end: KeyId;
+  fold: KeyId; // collapse node, or move up when the selection is not expandable
+  unfold: KeyId; // expand node, or move down when the selection is not expandable
+  toggle: KeyId; // expand/collapse the selected node
   escape: KeyId;
 }
 
-/**
- * Flatten expanded sources into one window: a header line per source plus
- * its expanded content. Empty when no RULES.md exists.
- */
-export type PreviewStyle = "dim" | "plain";
-
-export interface PreviewSegment {
-  style: PreviewStyle;
-  lines: string[];
+export interface RuleTree {
+  title: string;
+  header: string[]; // dim lines above the tree (limits etc.)
+  roots: RuleTreeNode[];
 }
 
 /**
- * Build the window content as styled segments: the report first (dim),
- * then per source a muted header line followed by plain expanded content.
- * The "Rules: …" stats line is dropped — the window title already carries it.
- * Empty when no RULES.md exists.
+ * Build the tree shown by /rules show. Roots are the source files plus
+ * optional Settings/Diagnostics nodes. Source children come from the
+ * structural tree recorded during expansion; sources without one (e.g.
+ * hand-built Expansion objects) fall back to a single Rules node.
  */
-export function buildPreviewBlocks(exp: Expansion | undefined): { title: string; segments: PreviewSegment[] } {
-  if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", segments: [] };
-  const report = buildReport(exp); // first line duplicates the title → skip it
-  const segments: PreviewSegment[] = [
-    { style: "dim", lines: report.slice(1) },
-    { style: "dim", lines: [""] },
-  ];
+export function buildRuleTree(exp: Expansion | undefined): RuleTree {
+  if (!exp || exp.sources.length === 0) return { title: "RULES.md (expanded)", header: [], roots: [] };
+  const roots: RuleTreeNode[] = [];
   for (const s of exp.sources) {
-    segments.push({ style: "plain", lines: s.content.split("\n") });
-    segments.push({ style: "plain", lines: [""] });
+    const children = (s.tree ?? []).length > 0 ? s.tree : fallbackTreeFromContent(s.content);
+    roots.push({
+      id: `src:${s.path}`,
+      kind: "source",
+      label: `[${s.kind}] ${s.path}`,
+      meta: `${s.lines} lines · ${fmtBytes(s.bytes)}`,
+      children,
+    });
   }
-  return {
-    title: `RULES.md (expanded) — ${exp.sources.length} file(s) · ${fmtBytes(exp.totalBytes)} · ~${Math.round(exp.totalBytes / 4)} tokens`,
-    segments,
-  };
+  if (exp.settings.length > 0) {
+    roots.push({
+      id: "settings",
+      kind: "settings",
+      label: `Settings (${exp.settings.length})`,
+      lines: exp.settings.map((s) => `${s.key} = ${s.value} (${s.source})`),
+    });
+  }
+  if (exp.diagnostics.length > 0) {
+    roots.push({
+      id: "diagnostics",
+      kind: "diagnostics",
+      label: `Diagnostics (${exp.diagnostics.length})`,
+      lines: exp.diagnostics.map((d) => `${statusMark(d.level === "error" ? "error" : "warning")} ${d.message}`),
+    });
+  }
+  const title = `RULES.md — ${exp.sources.length} file(s) · ${fmtBytes(exp.totalBytes)} · ~${Math.round(exp.totalBytes / 4)} tokens`;
+  const header = [
+    `limits: depth ${exp.limits.maxDepth} · glob ≤ ${exp.limits.maxGlobFiles} files · total ≤ ${fmtBytes(exp.limits.maxTotalBytes)}` +
+      (exp.settings.length > 0 ? " · overridden in RULES.md" : " (defaults)"),
+  ];
+  return { title, header, roots };
+}
+
+function fallbackTreeFromContent(content: string): RuleTreeNode[] {
+  const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return [];
+  return [{ id: "rules", kind: "content", label: `Rules (${lines.length})`, lines }];
+}
+
+interface FlatLine {
+  node?: RuleTreeNode; // set on node lines; leaf content lines have no node
+  text: string;
+  depth: number;
+  expandable: boolean;
 }
 
 /**
- * Scrollable bordered window as a plain structural Component (no pi-tui
- * classes — keeps this file importable by tests with plain Node). All
- * pi-tui functions are injected. Overlay by default; full screen when
- * fullScreen is true.
+ * Collapsible keyboard-driven tree window for /rules show. A plain structural
+ * Component (no pi-tui classes — keeps this file importable by tests with
+ * plain Node); all pi-tui functions are injected. pi-tui custom components
+ * receive keyboard input only (no mouse events), so folding is keyboard-
+ * driven, matching pi's own session-tree conventions:
+ *   ↑↓ move · ← fold (or up) · → unfold (or down) · Enter/Space toggle · Esc close
+ * Default state: source + Rules nodes expanded, imports/settings/diagnostics
+ * collapsed. Overlay by default; full screen when fullScreen is true.
  */
-export function makePreviewWindow(
+export function makeRuleTreeWindow(
   tui: { terminal: { rows: number }; requestRender: (force?: boolean) => void },
   theme: Theme,
   done: PreviewDone,
-  title: string,
-  segments: PreviewSegment[],
+  tree: RuleTree,
   truncate: PreviewTruncate,
   visibleWidth: (text: string) => number,
   matchesKey: PreviewMatchesKey,
-  keys: PreviewKeys,
+  keys: RuleTreeKeys,
   fullScreen: boolean,
 ): { render: (width: number) => string[]; handleInput: (data: string) => void; invalidate: () => void } {
-  // Flatten segments into lines plus a per-line style so scrolling stays index-based.
-  const flat: string[] = [];
-  const flatStyle: PreviewStyle[] = [];
-  for (const seg of segments) {
-    for (const line of seg.lines) {
-      flat.push(line);
-      flatStyle.push(seg.style);
+  const open = new Set<string>();
+  const collectDefaultOpen = (nodes: RuleTreeNode[]) => {
+    for (const n of nodes) {
+      if (n.kind === "source" || n.kind === "content") open.add(n.id);
+      collectDefaultOpen(n.children ?? []);
     }
-  }
-  const styleLine = (i: number, text: string): string => {
-    return (flatStyle[i] ?? "plain") === "dim" ? theme.fg("dim", text) : text;
   };
+  collectDefaultOpen(tree.roots);
+
+  const flatten = (): FlatLine[] => {
+    const out: FlatLine[] = [];
+    const walk = (nodes: RuleTreeNode[], depth: number) => {
+      for (const n of nodes) {
+        const isOpen = open.has(n.id);
+        const expandable =
+          (n.children !== undefined && n.children.length > 0) || (n.lines !== undefined && n.lines.length > 0);
+        const marker = expandable ? (isOpen ? "-" : "+") : " ";
+        const meta = n.meta !== undefined ? `  (${n.meta})` : "";
+        out.push({ node: n, text: `${'  '.repeat(depth)}${marker} ${n.label}${meta}`, depth, expandable });
+        if (isOpen && expandable) {
+          if (n.lines !== undefined) {
+            for (const l of n.lines) out.push({ node: undefined, text: `${'  '.repeat(depth + 1)}  ${l}`, depth: depth + 1, expandable: false });
+          }
+          if (n.children !== undefined) walk(n.children, depth + 1);
+        }
+      }
+    };
+    walk(tree.roots, 0);
+    return out;
+  };
+
+  let flat = flatten();
+  let sel = 0;
+  let offset = 0;
+
   const contentHeight = () => {
     const rows = tui.terminal.rows;
     // full-screen: rough editor-area estimate; overlay: keep under maxHeight.
     // Both leave room for the top and bottom border lines.
     return Math.max(3, Math.floor(fullScreen ? rows - 10 : rows * 0.85 - 4));
   };
-  let offset = 0;
+  const treeHeight = () => Math.max(1, contentHeight() - tree.header.length);
   const clamp = () => {
-    const max = Math.max(0, flat.length - contentHeight());
+    const max = Math.max(0, flat.length - treeHeight());
     if (offset > max) offset = max;
     if (offset < 0) offset = 0;
+    if (sel > flat.length - 1) sel = Math.max(0, flat.length - 1);
+    if (sel < 0) sel = 0;
+    // keep the selection visible
+    if (sel < offset) offset = sel;
+    if (sel >= offset + treeHeight()) offset = sel - treeHeight() + 1;
   };
+
   // ┌─ title ────────┐  (title styled accent, border dim)
   const topBorder = (width: number): string => {
-    const t = theme.fg("accent", ` ${truncate(title, Math.max(4, width - 8), "…")} `);
+    const t = theme.fg("accent", ` ${truncate(tree.title, Math.max(4, width - 8), "…")} `);
     const fill = Math.max(1, width - 3 - visibleWidth(t));
     return theme.fg("dim", "┌─") + t + theme.fg("dim", "─".repeat(fill) + "┐");
   };
@@ -887,18 +1040,20 @@ export function makePreviewWindow(
   return {
     render(width: number): string[] {
       clamp();
-      const h = contentHeight();
+      const h = treeHeight();
       const inner = Math.max(1, width - 2);
-      const out: string[] = [topBorder(width)];
       const bar = theme.fg("dim", "│");
-      for (let i = offset; i < offset + h && i < flat.length; i++) {
-        out.push(`${bar}${truncate(styleLine(i, flat[i] ?? ""), inner, "", true)}${bar}`);
+      const out: string[] = [topBorder(width)];
+      for (const hline of tree.header) {
+        out.push(`${bar}${truncate(theme.fg("dim", hline), inner, "", true)}${bar}`);
       }
-      while (out.length < h + 1) out.push(`${bar}${' '.repeat(inner)}${bar}`);
-      const first = offset + 1;
-      const last = Math.min(offset + h, flat.length);
-      const pct = flat.length > 0 ? Math.round((offset / Math.max(1, flat.length - h)) * 100) : 0;
-      out.push(bottomBorder(` ${first}–${last} / ${flat.length} (${pct}%) · ↑↓ PgUp/PgDn Home/End · Esc `, width));
+      for (let i = offset; i < offset + h && i < flat.length; i++) {
+        const line = flat[i];
+        const text = i === sel ? theme.fg("accent", line.text) : line.text;
+        out.push(`${bar}${truncate(text, inner, "", true)}${bar}`);
+      }
+      while (out.length < 1 + tree.header.length + h) out.push(`${bar}${' '.repeat(inner)}${bar}`);
+      out.push(bottomBorder(` ${sel + 1} / ${flat.length} · ↑↓ move · ← fold · → unfold · Enter toggle · Home/End · Esc `, width));
       return out;
     },
     handleInput(data: string): void {
@@ -907,38 +1062,74 @@ export function makePreviewWindow(
         return;
       }
       if (matchesKey(data, keys.up)) {
-        offset--;
+        sel--;
         clamp();
         tui.requestRender();
         return;
       }
       if (matchesKey(data, keys.down)) {
-        offset++;
+        sel++;
         clamp();
         tui.requestRender();
         return;
       }
       if (matchesKey(data, keys.pageUp)) {
-        offset -= contentHeight();
+        sel -= treeHeight();
         clamp();
         tui.requestRender();
         return;
       }
       if (matchesKey(data, keys.pageDown)) {
-        offset += contentHeight();
+        sel += treeHeight();
         clamp();
         tui.requestRender();
         return;
       }
       if (matchesKey(data, keys.home)) {
-        offset = 0;
+        sel = 0;
+        clamp();
         tui.requestRender();
         return;
       }
       if (matchesKey(data, keys.end)) {
-        offset = flat.length;
+        sel = flat.length - 1;
         clamp();
         tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.fold)) {
+        const n = flat[sel]?.node;
+        if (n && flat[sel].expandable && open.has(n.id)) {
+          open.delete(n.id);
+          flat = flatten();
+        } else {
+          sel--;
+        }
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.unfold)) {
+        const n = flat[sel]?.node;
+        if (n && flat[sel].expandable && !open.has(n.id)) {
+          open.add(n.id);
+          flat = flatten();
+        } else {
+          sel++;
+        }
+        clamp();
+        tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, keys.toggle)) {
+        const n = flat[sel]?.node;
+        if (n && flat[sel].expandable) {
+          if (open.has(n.id)) open.delete(n.id);
+          else open.add(n.id);
+          flat = flatten();
+          clamp();
+          tui.requestRender();
+        }
         return;
       }
     },
@@ -963,10 +1154,10 @@ export default function rulesExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("rules", {
     description:
-      "Manage RULES.md ground-truth rules: show report and expanded rules in a window, init a template, reload into the system prompt",
+      "Manage RULES.md ground-truth rules: show a collapsible rules tree in a window, init a template, reload into the system prompt",
     getArgumentCompletions: async (prefix) => {
       const opts = [
-        { value: "show", label: "show", description: "Show report + expanded rules in a scrollable window (full = full screen, Esc closes)" },
+        { value: "show", label: "show", description: "Show rules as a tree in a window (← fold, → unfold, Enter toggle, full = full screen, Esc closes)" },
         { value: "init", label: "init", description: "Create a RULES.md template (--force overwrites, -g writes global)" },
         { value: "reload", label: "reload", description: "Re-read RULES.md files and rebuild the system prompt" },
       ];
@@ -985,8 +1176,8 @@ export default function rulesExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(report.join("\n"), "info");
           return;
         }
-        const { title, segments } = buildPreviewBlocks(exp);
-        if (segments.length === 0) {
+        const tree = buildRuleTree(exp);
+        if (tree.roots.length === 0) {
           ctx.ui.notify("No RULES.md found — run /rules init to create a template", "error");
           return;
         }
@@ -1005,19 +1196,22 @@ export default function rulesExtension(pi: ExtensionAPI): void {
           return;
         }
         const { matchesKey, Key, truncateToWidth, visibleWidth } = tui;
-        const keys: PreviewKeys = {
+        const keys: RuleTreeKeys = {
           up: Key.up,
           down: Key.down,
           pageUp: Key.pageUp,
           pageDown: Key.pageDown,
           home: Key.home,
           end: Key.end,
+          fold: Key.left,
+          unfold: Key.right,
+          toggle: Key.enter,
           escape: Key.escape,
         };
         const fullScreen = argv.includes("full");
         await ctx.ui.custom(
           (tuiInstance, theme, _kb, done) =>
-            makePreviewWindow(tuiInstance, theme, done, title, segments, truncateToWidth, visibleWidth, matchesKey, keys, fullScreen),
+            makeRuleTreeWindow(tuiInstance, theme, done, tree, truncateToWidth, visibleWidth, matchesKey, keys, fullScreen),
           fullScreen
             ? undefined
             : { overlay: true, overlayOptions: { width: "80%", maxHeight: "85%", margin: 2 } },
