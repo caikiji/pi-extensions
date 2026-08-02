@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
-  "version": "0.17.0",
-  "description": "Personal pi extensions: handoff, rules, skim, checkpoint",
+  "version": "0.17.1",
+  "description": "Personal pi extensions: handoff, rules",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -14,9 +14,7 @@
   "pi": {
     "extensions": [
       "./extensions/handoff.ts",
-      "./extensions/rules.ts",
-      "./extensions/skim.ts",
-      "./extensions/checkpoint.ts"
+      "./extensions/rules.ts"
     ]
   },
   "peerDependencies": {
