@@ -320,6 +320,91 @@ console.log("Test 17: /checkpoint and /restore argument completions");
 	assert(rsPrefix.some((i) => i.value === "latest"), "restore filters by prefix");
 }
 
+// ================= Test 18: empty / whitespace ids are refused =================
+console.log("Test 18: empty and whitespace ids are refused");
+{
+	write("a.txt", "t18-v1");
+	const e = await mod.createCheckpoint(exec, TMP, "t18", false);
+	write("a.txt", "t18-broken");
+	const res = await mod.restoreCheckpoint(exec, TMP, "");
+	assert(res.ok === false && res.error.includes("id required"), "empty id refused (no silent latest match)");
+	const res2 = await mod.restoreCheckpoint(exec, TMP, "   ");
+	assert(res2.ok === false && res2.error.includes("id required"), "whitespace id refused");
+	assert(read("a.txt") === "t18-broken", "nothing was restored by the empty id");
+	assert((await mod.dropCheckpoint(exec, TMP, "")).length === 0, "empty drop is a no-op");
+	const res3 = await mod.restoreCheckpoint(exec, TMP, e.id, { force: true });
+	assert(res3.ok && read("a.txt") === "t18-v1", "explicit id still restores");
+}
+
+// ================= Test 19: ambiguous id prefixes are refused =================
+console.log("Test 19: ambiguous id prefixes are refused");
+{
+	const stateFile = join(TMP, ".git", "pi-checkpoints", "state.json");
+	const state = JSON.parse(readFileSync(stateFile, "utf8"));
+	state.entries.push(
+		{ id: "cp-test0000-aaaa", msg: "fake A", ts: Date.now() - 2000, sha: "", tracked: [], untracked: [], skipped: [], auto: false },
+		{ id: "cp-test0000-bbbb", msg: "fake B", ts: Date.now() - 1000, sha: "", tracked: [], untracked: [], skipped: [], auto: false },
+	);
+	writeFileSync(stateFile, JSON.stringify(state));
+	const res = await mod.restoreCheckpoint(exec, TMP, "cp-test0000");
+	assert(res.ok === false && res.error.includes("ambiguous"), "ambiguous prefix refused on restore");
+	let threw = false;
+	try { await mod.dropCheckpoint(exec, TMP, "cp-test0000"); } catch (err) { threw = err instanceof Error && err.message.includes("ambiguous"); }
+	assert(threw, "ambiguous prefix refused on drop");
+	const res2 = await mod.restoreCheckpoint(exec, TMP, "cp-test0000-aaaa");
+	assert(res2.ok, "exact id still restores");
+	const dropped = await mod.dropCheckpoint(exec, TMP, "cp-test0000-bbbb");
+	assert(dropped.length === 1 && dropped[0] === "cp-test0000-bbbb", "exact drop still works");
+}
+
+// ================= Test 20: deleted-in-snapshot restore clears the index =================
+console.log("Test 20: deleted-in-snapshot restore clears worktree + index");
+{
+	write("gone.txt", "v1");
+	git(["add", "gone.txt"]);
+	git(["commit", "-qm", "add gone.txt"]);
+	git(["rm", "-q", "gone.txt"]);
+	const e = await mod.createCheckpoint(exec, TMP, "gone deleted", false);
+	assert(e !== null && e.tracked.includes("gone.txt"), "deletion captured");
+	// re-created AND staged after the checkpoint: without git rm the next
+	// commit would resurrect the file
+	write("gone.txt", "resurrected");
+	git(["add", "gone.txt"]);
+	const res = await mod.restoreCheckpoint(exec, TMP, e.id, { force: true });
+	assert(res.ok && res.restored.includes("gone.txt (deleted)"), "force restore removes the file");
+	assert(!existsSync(join(TMP, "gone.txt")), "worktree file gone");
+	assert(git(["ls-files", "gone.txt"]).stdout.trim() === "", "index entry gone (no resurrection on commit)");
+	git(["commit", "-qm", "record removal"]);
+	// re-created but never staged: git rm skips it, the worktree sweep removes it
+	write("gone.txt", "v2");
+	git(["add", "gone.txt"]);
+	git(["commit", "-qm", "re-add gone"]);
+	git(["rm", "-q", "gone.txt"]);
+	const e2 = await mod.createCheckpoint(exec, TMP, "gone2 deleted", false);
+	write("gone.txt", "untracked resurrection");
+	const res2 = await mod.restoreCheckpoint(exec, TMP, e2.id, { force: true });
+	assert(res2.ok && res2.restored.includes("gone.txt (deleted)"), "untracked resurrection removed");
+	assert(!existsSync(join(TMP, "gone.txt")), "untracked resurrection worktree file gone");
+}
+
+// ================= Test 21: glob chars in file names =================
+console.log("Test 21: file names with glob chars handled literally");
+{
+	write("glob[1].txt", "g1");
+	write("glob1.txt", "decoy");
+	git(["add", "."]);
+	git(["commit", "-qm", "add globs"]);
+	write("glob[1].txt", "g2");
+	write("glob1.txt", "decoy-modified");
+	const e = await mod.createCheckpoint(exec, TMP, "globs", false);
+	assert(e !== null && e.tracked.includes("glob[1].txt") && e.tracked.includes("glob1.txt"), "both captured");
+	write("glob[1].txt", "g3"); // only the literal file changes after the checkpoint
+	const res = await mod.restoreCheckpoint(exec, TMP, e.id, { force: true });
+	assert(res.ok && res.restored.includes("glob[1].txt"), "literal glob-char file restored");
+	assert(read("glob[1].txt") === "g2", "glob-char file reverted to snapshot");
+	assert(read("glob1.txt") === "decoy-modified", "decoy file untouched (no glob over-match)");
+}
+
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -19,12 +19,17 @@
  *   - All git commands run from the repo root (resolved via --show-toplevel),
  *     so the extension works from any cwd inside or outside the repo.
  *   - Tracked files are restored with `git restore --source=<sha> --worktree --staged`.
- *   - Untracked (new) files are copied into .git/pi-checkpoints/<id>/untracked/
  *     at snapshot time and copied back on restore.
+ *   - Files deleted in the snapshot are removed with `git rm` (index cleared
+ *     too, so the next commit cannot resurrect them) plus a worktree sweep
+ *     for untracked recreations; only with --force.
  *   - Restore refuses (unless --force) any file whose current content differs
- *     from the snapshot — that means you changed it too (a batched,
+ *     from the snapshot - that means you changed it too (a batched,
  *     filter-aware `git diff` catches edits, staged changes, and reverts
  *     to HEAD).
+ *   - Ids match exactly or by unique prefix; empty and ambiguous ids are
+ *     refused. All pathspecs are passed literally (--literal-pathspecs) so
+ *     `[` `*` `?` in file names cannot over-match other files.
  *   - An automatic checkpoint is taken at every turn_start (ring of 20), so the
  *     agent always has a recent save point even without asking.
  *
@@ -286,13 +291,28 @@ export async function restoreCheckpoint(
 	if (!gitDir) return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `not a git repository (cwd: ${cwd}) - run pi inside the repo or pass repo=<path>` };
 
 	const state = loadState(gitDir);
+	const target = idOrLatest.trim();
+	if (!target) {
+		return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: "checkpoint id required (got an empty id)" };
+	}
 	let entry: CheckpointEntry | undefined;
 	// 'latest' skips pre-restore snapshots (internal restore side-effects).
-	if (idOrLatest === "latest") entry = state.entries.find((e) => !e.msg.startsWith("pre-restore"));
-	else entry = state.entries.find((e) => e.id === idOrLatest || e.id.startsWith(idOrLatest));
+	if (target === "latest") {
+		entry = state.entries.find((e) => !e.msg.startsWith("pre-restore"));
+	} else {
+		// Exact id first, then a unique prefix. Plain startsWith would let an
+		// empty or shared prefix silently target the wrong checkpoint.
+		let matches = state.entries.filter((e) => e.id === target);
+		if (matches.length === 0) matches = state.entries.filter((e) => e.id.startsWith(target));
+		if (matches.length === 1) entry = matches[0];
+		else if (matches.length > 1) {
+			const ids = matches.slice(0, 8).map((e) => e.id).join(", ");
+			return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `checkpoint id "${target}" is ambiguous, matches: ${ids}` };
+		}
+	}
 	if (!entry) {
 		const ids = state.entries.slice(0, 8).map((e) => e.id).join(", ");
-		return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `checkpoint not found: ${idOrLatest} (known: ${ids || "none"})` };
+		return { ok: false, restored: [], conflicts: [], wouldDelete: [], error: `checkpoint not found: ${target} (known: ${ids || "none"})` };
 	}
 
 	const force = opts.force ?? false;
@@ -318,7 +338,7 @@ export async function restoreCheckpoint(
 	// and reverts to HEAD). Deletions (D) are excluded - restoring recreates
 	// a file that was deleted since the checkpoint.
 	if (entry.sha && present.length > 0) {
-		const diffRes = await exec("git", ["diff", "--name-only", "--diff-filter=AMT", "--no-renames", entry.sha, "--", ...present], { cwd: root });
+		const diffRes = await exec("git", ["--literal-pathspecs", "diff", "--name-only", "--diff-filter=AMT", "--no-renames", entry.sha, "--", ...present], { cwd: root });
 		if (diffRes.code === 0) {
 			const dirty = new Set(diffRes.stdout.split("\n").filter(Boolean));
 			for (const rel of present) {
@@ -376,7 +396,7 @@ export async function restoreCheckpoint(
 
 	// Apply: tracked files from the snapshot commit (worktree + index).
 	if (entry.sha && restoreable.length > 0) {
-		await execOk(exec, root, "git", ["restore", "--source=" + entry.sha, "--worktree", "--staged", "--", ...restoreable]);
+		await execOk(exec, root, "git", ["--literal-pathspecs", "restore", "--source=" + entry.sha, "--worktree", "--staged", "--", ...restoreable]);
 	}
 	restored.push(...restoreable);
 
@@ -389,13 +409,21 @@ export async function restoreCheckpoint(
 		restored.push(rel);
 	}
 
-	// Deleted-in-snapshot files: only remove with --force.
-	if (wouldDelete.length > 0) {
-		if (force) {
+	// Deleted-in-snapshot files: only remove with --force. `git rm` clears the
+	// index entry too (a plain rmSync would leave it staged or committed, so the
+	// next commit resurrects the file); the worktree sweep after it covers
+	// untracked recreations that --ignore-unmatch skipped.
+	if (wouldDelete.length > 0 && force) {
+		const rmRes = await exec("git", ["--literal-pathspecs", "rm", "-f", "--ignore-unmatch", "--", ...wouldDelete], { cwd: root });
+		if (rmRes.code !== 0) {
+			// e.g. a directory replaced the file: git rm refuses. Remove the
+			// worktree path anyway and surface the index problem loudly.
 			for (const rel of wouldDelete) rmSync(join(root, rel), { force: true });
-			restored.push(...wouldDelete.map((r) => `${r} (deleted)`));
-			wouldDelete.length = 0;
+			throw new Error(`git rm failed for deleted-in-snapshot file(s): ${rmRes.stderr.trim() || rmRes.stdout.trim()}`);
 		}
+		for (const rel of wouldDelete) rmSync(join(root, rel), { force: true });
+		restored.push(...wouldDelete.map((r) => `${r} (deleted)`));
+		wouldDelete.length = 0;
 	}
 
 	return { ok: true, restored, conflicts, wouldDelete, id: entry.id };
@@ -407,7 +435,20 @@ export async function dropCheckpoint(exec: ExecFn, cwd: string, idOrAll: string)
 	const gitDir = await getGitDir(exec, root);
 	if (!gitDir) return [];
 	const state = loadState(gitDir);
-	const targets = idOrAll === "all" ? state.entries : state.entries.filter((e) => e.id === idOrAll || e.id.startsWith(idOrAll));
+	const target = idOrAll.trim();
+	if (!target) return [];
+	let targets: CheckpointEntry[];
+	if (target === "all") {
+		targets = state.entries;
+	} else {
+		// Exact id first, then a unique prefix; refuse ambiguity (same rule as
+		// restoreCheckpoint) so `drop <prefix>` cannot nuke several at once.
+		const exact = state.entries.filter((e) => e.id === target);
+		targets = exact.length > 0 ? exact : state.entries.filter((e) => e.id.startsWith(target));
+		if (targets.length > 1) {
+			throw new Error(`checkpoint id "${target}" is ambiguous, matches: ${targets.map((e) => e.id).join(", ")}`);
+		}
+	}
 	const dropped: string[] = [];
 	for (const e of targets) {
 		if (e.sha) await exec("git", ["update-ref", "-d", `refs/pi-checkpoints/${e.id}`], { cwd: root });
