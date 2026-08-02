@@ -416,6 +416,34 @@ console.log("Test 15: max_glob_files and max_total_bytes are hard caps");
   assert(g2.includes("[rules] truncated"), "cut marked in the prompt");
 }
 
+// ================= Test 16: glob cache invalidates on new files ================
+console.log("Test 16: new files matching a glob invalidate the cache");
+{
+  writeFileSync(join(TMP, "RULES.md"), "@import docs/patterns/*.md\n");
+  const g1 = (await inject(TMP)).systemPrompt;
+  assert(g1.includes("- p1") && g1.includes("- p2"), "initial glob expansion");
+  writeFileSync(join(TMP, "docs/patterns/three.md"), "- p3\n");
+  const g2 = (await inject(TMP)).systemPrompt;
+  assert(g2.includes("- p3"), "new file under the glob picked up without reload");
+
+  // nested ** glob: a new file in a subdirectory invalidates too
+  writeFileSync(join(TMP, "RULES.md"), "@import docs/nested/**/*.md\n");
+  const g3 = (await inject(TMP)).systemPrompt;
+  assert(g3.includes("helper stuff") && g3.includes("lib stuff"), "recursive glob expansion");
+  writeFileSync(join(TMP, "docs/nested/deep/new.md"), "- deep new\n");
+  const g4 = (await inject(TMP)).systemPrompt;
+  assert(g4.includes("- deep new"), "new file in a nested dir picked up");
+
+  // empty glob: creating the directory later invalidates too
+  writeFileSync(join(TMP, "RULES.md"), "@import docs/gone/*.md\n");
+  const g5 = (await inject(TMP)).systemPrompt;
+  assert(g5.includes("glob matched no files"), "empty glob reported");
+  mkdirSync(join(TMP, "docs/gone"), { recursive: true });
+  writeFileSync(join(TMP, "docs/gone/a.md"), "- arrived\n");
+  const g6 = (await inject(TMP)).systemPrompt;
+  assert(g6.includes("- arrived"), "later-created glob dir picked up");
+}
+
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 else process.env.PI_CODING_AGENT_DIR = prevAgentDir;

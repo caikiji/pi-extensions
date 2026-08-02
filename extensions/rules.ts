@@ -188,7 +188,7 @@ interface Expansion {
   generated: string;
   limits: RulesConfig;
   settings: AppliedSetting[];
-  fileStats: Map<string, string | null>; // canonical path -> stat key (null = missing) of every referenced file
+  fileStats: Map<string, string | null>; // canonical path -> stat key (null = missing) of every referenced file or glob dir
 }
 
 export type RuleTreeNodeKind = "source" | "import" | "content" | "settings" | "diagnostics";
@@ -438,14 +438,15 @@ function segToRegex(seg: string): RegExp {
   return new RegExp("^" + s + "$");
 }
 
-function walkGlob(dir: string, segs: string[], idx: number, out: string[]): void {
+function walkGlob(dir: string, segs: string[], idx: number, out: string[], visited: Set<string>): void {
   if (idx >= segs.length) {
     if (statSync(dir).isFile()) out.push(dir);
     return;
   }
   const seg = segs[idx];
   if (seg === "**") {
-    walkGlob(dir, segs, idx + 1, out); // zero depth
+    walkGlob(dir, segs, idx + 1, out, visited); // zero depth
+    visited.add(dir);
     let entries: string[];
     try {
       entries = readdirSync(dir).sort();
@@ -455,10 +456,11 @@ function walkGlob(dir: string, segs: string[], idx: number, out: string[]): void
     for (const e of entries) {
       if (e.startsWith(".")) continue;
       const c = join(dir, e);
-      if (statSync(c).isDirectory()) walkGlob(c, segs, idx, out); // consume one level, stay on **
+      if (statSync(c).isDirectory()) walkGlob(c, segs, idx, out, visited); // consume one level, stay on **
     }
     return;
   }
+  visited.add(dir);
   let entries: string[];
   try {
     entries = readdirSync(dir).sort();
@@ -473,19 +475,19 @@ function walkGlob(dir: string, segs: string[], idx: number, out: string[]): void
     if (idx === segs.length - 1) {
       if (statSync(c).isFile()) out.push(c);
     } else if (statSync(c).isDirectory()) {
-      walkGlob(c, segs, idx + 1, out);
+      walkGlob(c, segs, idx + 1, out, visited);
     }
   }
 }
 
-function globMatch(pattern: string, baseDir: string): { files: string[] } {
+function globMatch(pattern: string, baseDir: string): { files: string[]; dirs: string[] } {
   const p = pattern.replace(/\\/g, "/");
   const abs = p.startsWith("/");
   const segs = p.split("/").filter((s) => s.length > 0);
   const wi = segs.findIndex((s) => s.includes("*") || s.includes("?"));
   if (wi === -1) {
     const f = resolveImportPath(p, baseDir);
-    return { files: existsSync(f) && statSync(f).isFile() ? [f] : [] };
+    return { files: existsSync(f) && statSync(f).isFile() ? [f] : [], dirs: [] };
   }
   // path.join() does not reset on absolute segments, so strip the leading
   // "/" or "~" segment before joining (otherwise bases like ~/~/docs appear).
@@ -494,11 +496,16 @@ function globMatch(pattern: string, baseDir: string): { files: string[] } {
   else if (segs[0] === "~") base = join(homedir(), segs.slice(1, wi).join("/"));
   else base = resolve(baseDir, segs.slice(0, wi).join("/"));
   const files: string[] = [];
+  // dirs are returned for cache invalidation: a new file appearing under a
+  // globbed dir changes its mtime, which cacheFresh detects. The base is
+  // recorded even when missing, so creating the directory later also
+  // invalidates the cache.
+  const visited = new Set<string>([base]);
   if (existsSync(base) && statSync(base).isDirectory()) {
-    walkGlob(base, segs.slice(wi), 0, files);
+    walkGlob(base, segs.slice(wi), 0, files, visited);
     files.sort();
   }
-  return { files };
+  return { files, dirs: [...visited] };
 }
 
 // ============================================================================
@@ -612,8 +619,9 @@ function expandImport(
 
   const isGlob = pathPart.includes("*") || pathPart.includes("?");
   if (isGlob) {
-    const { files } = globMatch(pathPart, baseDir);
+    const { files, dirs } = globMatch(pathPart, baseDir);
     for (const f of files) fileStats.set(resolve(f), statKey(f));
+    for (const d of dirs) fileStats.set(resolve(d), statKey(d)); // new files under the glob invalidate the cache
     if (files.length === 0) {
       diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} - glob matched no files` });
       imports.push({ spec, status: "warning", detail: "glob matched no files", bytes: 0 });
