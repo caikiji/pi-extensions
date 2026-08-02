@@ -69,7 +69,7 @@
 
 ## 决策与理由 (why, not how)
 
-- 扩展用零第三方依赖单文件 TS：只允许 @earendil-works/*（pi 自带包，jiti alias 解析到 pi 安装目录）运行时 import，第三方 npm 包禁止（git package 里解析脆弱）；被 tests/*.test.mjs 直接 import 的 .ts 顶层不得静态 import pi 运行时包（纯 Node 解析不到），需要时用动态 import 或结构化组件
+- 扩展用零第三方依赖单文件 TS：只允许 @earendil-works/*（pi 自带包，jiti alias 解析到 pi 安装目录）运行时 import；第三方 npm 包不建议（git package 里解析脆弱），确有必要时用动态 import 并 catch 降级；被 tests/*.test.mjs 直接 import 的 .ts 顶层不得静态 import pi 运行时包（纯 Node 解析不到），需要时用动态 import 或结构化组件
 - 代码、注释、以及 agent 可见的输出（tool/command 返回文本、notify、错误消息）一律纯英文 ASCII：注释和输出是给 agent/代码看的；中文只允许出现在用户文档（模板/README/RULES.md）
 - 测试放 tests/*.test.mjs，用 Node ≥22.18 原生类型剥离直接 import .ts：零 npm install 就能跑
 - 新增扩展必须同时注册到 package.json 的 pi.extensions 和 README 表格
