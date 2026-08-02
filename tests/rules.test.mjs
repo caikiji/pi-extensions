@@ -217,7 +217,7 @@ console.log("Test 10: global RULES.md honored");
   writeFileSync(join(TMP, "RULES.md"), [
     "@rules max_depth 2",
     "@rules max_glob_files 1",
-    "@rules max_total_bytes 100b",
+    "@rules max_total_bytes 500b",
     "@rules bogus 3",
     "@rules max_depth abc",
     "\\@rules max_depth 9  // escaped: literal, not applied",
@@ -399,6 +399,21 @@ console.log("Test 14: ~/ and absolute glob imports resolve their base dirs");
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
   }
+}
+
+// ================= Test 15: hard limits (glob cap + byte cap) =================
+console.log("Test 15: max_glob_files and max_total_bytes are hard caps");
+{
+  writeFileSync(join(TMP, "RULES.md"), "@rules max_glob_files 1\n@import docs/patterns/*.md\n");
+  const g1 = (await inject(TMP)).systemPrompt;
+  assert(g1.includes("- p1") && !g1.includes("- p2"), "glob capped: only the first matched file expanded");
+  assert(g1.includes("glob limit 1 exceeded"), "capped files marked in the prompt");
+
+  writeFileSync(join(TMP, "RULES.md"), "@rules max_total_bytes 100\n- rule one: alpha\n- rule two: beta\n- rule three: gamma\n- rule four: delta\n- rule five: echo\n- rule six: foxtrot\n- rule seven: golf\n- rule eight: hotel\n");
+  const g2 = (await inject(TMP)).systemPrompt;
+  assert(g2.includes("- rule one: alpha"), "content before the cut kept");
+  assert(!g2.includes("- rule eight"), "content beyond the cap dropped");
+  assert(g2.includes("[rules] truncated"), "cut marked in the prompt");
 }
 
 // restore env

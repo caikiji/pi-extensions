@@ -40,8 +40,8 @@ const DEFAULT_LIMITS = { maxDepth: 5, maxGlobFiles: 50, maxTotalBytes: 50 * 1024
 
 interface RulesConfig {
   maxDepth: number; // import nesting levels allowed from RULES.md
-  maxGlobFiles: number; // glob matches above this trigger a warning
-  maxTotalBytes: number; // expanded size above this triggers a warning
+  maxGlobFiles: number; // hard cap: files expanded per glob (rest skipped)
+  maxTotalBytes: number; // hard cap: expanded content bytes (truncated with a marker)
 }
 
 interface AppliedSetting {
@@ -79,7 +79,8 @@ const TEMPLATE = `<!-- =========================================================
                                           设置参数（影响本文件其余部分及其导入）
     @rules max_glob_files 50              max_depth / max_glob_files / max_total_bytes (b/kb/mb)
     @rules max_total_bytes 50kb           defaults: depth 5 · glob 50 files · 50 KB
-                                          默认值：深度 5 · glob 50 个文件 · 总量 50 KB
+                                          hard limits: glob stops at max_glob_files, content truncates with a marker
+                                          硬限制：glob 展开到上限即停，内容超限截断并加标记
     Imported files may import further (cycles detected, files deduped)
     被导入文件可继续导入（自动防环、按路径去重）
 ============================================================ -->
@@ -619,16 +620,19 @@ function expandImport(
       out.push(`[rules] skipped: ${spec} (glob matched no files)`);
       return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "warning", meta: "glob matched no files" };
     }
-    if (files.length > config.maxGlobFiles) {
+    const capped = files.length > config.maxGlobFiles;
+    if (capped) {
       diagnostics.push({
-        message: `${sourceFile}: @import ${spec} - ${files.length} matches (> ${config.maxGlobFiles})`,
+        level: "warning",
+        message: `${sourceFile}: @import ${spec} - ${files.length} matches, expanding first ${config.maxGlobFiles}`
       });
     }
     let total = 0;
     const childNodes: RuleTreeNode[] = [];
     const relLabel = sharedDirLabel(files);
-    for (let fi = 0; fi < files.length; fi++) {
-      const f = files[fi];
+    const expanded = capped ? files.slice(0, config.maxGlobFiles) : files;
+    for (let fi = 0; fi < expanded.length; fi++) {
+      const f = expanded[fi];
       const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile, `${nodeId}/f:${fi}`);
       if (r.ok) {
         out.push(r.text);
@@ -646,14 +650,18 @@ function expandImport(
         childNodes.push({ id: `${nodeId}/f:${fi}`, kind: "import", label: relLabel(f), status: "error", meta: r.reason });
       }
     }
-    imports.push({
-      spec,
-      status: total > 0 ? (files.length > config.maxGlobFiles ? "warning" : "ok") : "error",
-      detail: `${files.length} file${files.length > 1 ? "s" : ""}`,
-      bytes: total,
-    });
-    const status = total > 0 ? (files.length > config.maxGlobFiles ? "warning" : "ok") : "error";
-    return { id: nodeId, kind: "import", label: `@import ${spec}`, status, meta: `${files.length} file${files.length > 1 ? "s" : ""} · ${fmtBytes(total)}`, children: childNodes };
+    if (capped) {
+      const skipped = files.length - config.maxGlobFiles;
+      out.push(`[rules] skipped: ${spec} - ${skipped} more file(s) (glob limit ${config.maxGlobFiles} exceeded)`);
+      childNodes.push({ id: `${nodeId}/f:${expanded.length}`, kind: "import", label: `${skipped} more file(s)`, status: "warning", meta: `glob limit ${config.maxGlobFiles}` });
+    }
+    const status = total > 0 ? (capped ? "warning" : "ok") : "error";
+    const detail = capped ? `${expanded.length}/${files.length} file(s)` : `${files.length} file${files.length > 1 ? "s" : ""}`;
+    imports.push({ spec, status, detail, bytes: total });
+    const meta = capped
+      ? `${expanded.length}/${files.length} file(s) · ${fmtBytes(total)}`
+      : `${files.length} file${files.length > 1 ? "s" : ""} · ${fmtBytes(total)}`;
+    return { id: nodeId, kind: "import", label: `@import ${spec}`, status, meta, children: childNodes };
   }
 
   const p = resolveImportPath(pathPart, baseDir);
@@ -772,7 +780,6 @@ function computeExpansion(cwd: string): Expansion {
   const stack = new Set<string>();
   const imported = new Set<string>();
   const sources: SourceInfo[] = [];
-  const blocks: string[] = [];
   let totalBytes = 0;
   const config = defaultConfig();
   const settings: AppliedSetting[] = [];
@@ -819,21 +826,36 @@ function computeExpansion(cwd: string): Expansion {
     const content = out.join("\n").trim();
     const lines = raw.split(/\r?\n/).length;
     sources.push({ path: displayPath(c.path), kind: c.kind, lines, bytes: content.length, content, imports, tree });
-    blocks.push(`<rules_source path="${displayPath(c.path)}">\n${content}\n</rules_source>`);
     totalBytes += content.length;
   }
 
-  if (totalBytes > config.maxTotalBytes) {
+  // max_total_bytes is a hard cap on the expanded content: shrink trailing
+  // source contents until the text fits, marking the cut so the agent knows
+  // the rules are incomplete instead of silently truncated.
+  const cap = config.maxTotalBytes;
+  const kept: string[] = [];
+  let budget = cap;
+  for (const s of sources) {
+    if (budget <= 0) break;
+    let c = s.content;
+    if (c.length > budget) {
+      const marker = "\n[rules] truncated: max_total_bytes exceeded - content incomplete\n";
+      const room = Math.max(0, budget - marker.length);
+      c = room > 0 ? c.slice(0, room) + marker : "";
+    }
+    kept.push(`<rules_source path="${s.path}">\n${c}\n</rules_source>`);
+    budget -= c.length;
+  }
+  if (totalBytes > cap) {
     diagnostics.push({
       level: "warning",
-      message: `total expanded size ${fmtBytes(totalBytes)} exceeds soft limit ${fmtBytes(config.maxTotalBytes)}`,
+      message: `total expanded size ${fmtBytes(totalBytes)} exceeds max_total_bytes ${fmtBytes(cap)} - output truncated`
     });
   }
-
   const generated =
     sources.length === 0
       ? ""
-      : `<rules_ground_truth>\n${PREAMBLE}\n\n${blocks.join("\n\n")}\n</rules_ground_truth>`;
+      : `<rules_ground_truth>\n${PREAMBLE}\n\n${kept.join("\n\n")}\n</rules_ground_truth>`;
 
   return { cwd, sources, diagnostics, totalBytes, generated, limits: config, settings, fileStats };
 }
