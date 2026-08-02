@@ -479,6 +479,53 @@ console.log("Test 17: section imports expand nested @import/@rules");
   const g3 = (await inject(TMP)).systemPrompt;
   assert(g3.includes("max depth 1 exceeded"), "section-local limit applied");
 }
+// ================= Test 18: @import-if conditional imports =================
+console.log("Test 18: @import-if conditional imports");
+{
+  process.env.RULES_IF_TEST = "1";
+  process.env.RULES_IF_EMPTY = "";
+  delete process.env.RULES_IF_GONE;
+  writeFileSync(join(TMP, "docs/oscheck.md"), "- os matched\n");
+  writeFileSync(join(TMP, "RULES.md"), [
+    "@import-if env:RULES_IF_TEST docs/conventions.md",
+    "@import-if env:RULES_IF_GONE docs/architecture.md#Data Flow",
+    "@import-if !env:RULES_IF_GONE docs/patterns/*.md",
+    "@import-if env:RULES_IF_TEST=1 docs/nested/helper.md",
+    "@import-if env:RULES_IF_EMPTY docs/missing-a.md",
+    "@import-if bogus docs/missing-b.md",
+    "@import-if os:definitely-not-a-platform docs/oscheck.md",
+    `@import-if os:${process.platform} docs/oscheck.md`,
+    "\\@import-if env:RULES_IF_GONE docs/literal.md",
+  ].join("\n"));
+  const g = (await inject(TMP)).systemPrompt;
+  assert(g.includes("UPDATED CONTENT"), "env set -> import expanded");
+  assert(!g.includes("flow A → B"), "env unset -> import skipped silently");
+  assert(g.includes("- p1") && g.includes("- p2"), "negated condition imports when env unset");
+  assert(g.includes("helper stuff"), "env:VAR=value exact match imports");
+  assert(!g.includes("missing-a"), "empty env treated as unset");
+  assert(!g.includes("missing-b"), "invalid condition -> skipped");
+  assert(!g.includes("[rules] skipped:"), "skips produce no prompt text");
+  assert(g.includes("@import-if env:RULES_IF_GONE docs/literal.md"), "escaped @import-if kept as literal");
+  assert(g.includes("os matched"), "current-platform os: condition imports");
+  assert(g.split("os matched").length - 1 === 1, "matching os: import deduped (skipped line contributes nothing)");
+
+  // env change invalidates the cache (condition results are part of the cache key)
+  process.env.RULES_IF_GONE = "1";
+  const g2 = (await inject(TMP)).systemPrompt;
+  assert(g2.includes("flow A → B"), "newly matching condition picked up without reload");
+  assert(!g2.includes("- p1"), "newly failing condition dropped without reload");
+
+  // report lists skips and the invalid-condition diagnostic
+  let n;
+  await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; } }, reload: async () => {} });
+  assert(n[1].includes("[skip]"), "skipped imports listed in the report");
+  assert(n[1].includes("invalid condition"), "invalid condition surfaces as a diagnostic");
+
+  delete process.env.RULES_IF_TEST;
+  delete process.env.RULES_IF_EMPTY;
+  delete process.env.RULES_IF_GONE;
+}
+
 
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

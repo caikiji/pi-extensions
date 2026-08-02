@@ -17,6 +17,9 @@
  *   @import docs/x.md                    import a whole file (relative to THIS file's directory)
  *   @import docs/x.md#section            import one heading section (heading line included)
  *   @import docs/*.md                    glob import: * one level, ** recursive, ? one char
+ *   @import-if os:darwin docs/macos.md   conditional import: os:<platform> | env:<VAR> |
+ *   @import-if env:CI docs/ci.md         env:<VAR>=<value>; prefix ! to negate; a skipped
+ *                                        import is silent in the prompt, [skip] in show/report
  *   @rules max_depth 5                   set limits: max_depth / max_glob_files / max_total_bytes
  *   Imported files may import further (cycles detected, files deduped, limits via @rules).
  *
@@ -73,6 +76,9 @@ const TEMPLATE = `<!-- =========================================================
                                           只导入该标题的 section（含标题行）
     @import docs/*.md                     glob import: * = one level, ** = recursive, ? = one char
                                           glob 导入：* 单层、** 递归、? 单字符
+    @import-if os:darwin docs/macos.md    conditional import: os:<platform> | env:<VAR> |
+    @import-if env:CI docs/ci.md          env:<VAR>=<value>; prefix ! to negate; skip is silent
+    @import-if !env:CI docs/local.md      条件导入：os: 平台 / env: 变量 / env: 变量=值；! 取反；不满足静默跳过
     \\@import literal                      escaped: shown literally, not expanded
                                           转义，原样显示、不展开
     @rules max_depth 5                    set limits (affects rest of this file + its imports):
@@ -149,6 +155,8 @@ const TEMPLATE = `<!-- =========================================================
 @import docs/conventions.md
 @import docs/architecture.md#data-flow
 @import docs/patterns/*.md
+@import-if os:darwin docs/macos.md
+@import-if env:CI docs/ci.md
 -->
 `;
 
@@ -163,7 +171,7 @@ interface Diagnostic {
 
 interface ImportInfo {
   spec: string;
-  status: "ok" | "error" | "warning";
+  status: "ok" | "error" | "warning" | "skip"; // skip = @import-if condition not met
   detail: string;
   bytes: number;
 }
@@ -188,6 +196,7 @@ interface Expansion {
   generated: string;
   limits: RulesConfig;
   settings: AppliedSetting[];
+  conditions: Map<string, boolean>; // evaluated @import-if results: cond -> matched (part of the cache key)
   fileStats: Map<string, string | null>; // canonical path -> stat key (null = missing) of every referenced file or glob dir
 }
 
@@ -203,7 +212,7 @@ export interface RuleTreeNode {
   id: string;
   kind: RuleTreeNodeKind;
   label: string; // pure ASCII
-  status?: "ok" | "error" | "warning";
+  status?: "ok" | "error" | "warning" | "skip";
   meta?: string; // right-side detail, e.g. "whole file · 1.2 KB"
   lines?: string[]; // leaf content (kind: content/settings/diagnostics)
   children?: RuleTreeNode[];
@@ -509,6 +518,98 @@ function globMatch(pattern: string, baseDir: string): { files: string[]; dirs: s
 }
 
 // ============================================================================
+// Conditional imports (@import-if)
+// ============================================================================
+
+interface CondResult {
+  valid: boolean; // condition syntax understood
+  matched: boolean; // condition evaluates to true
+  detail: string; // short human-readable explanation (pure ASCII)
+}
+
+/**
+ * Evaluate an @import-if condition: [!]os:<platform> | [!]env:<VAR> | [!]env:<VAR>=<value>.
+ * os: matches process.platform(); env:<VAR> matches when the variable is defined and
+ * non-empty; env:<VAR>=<value> matches on exact value equality. A leading ! negates.
+ * Conditions are deterministic per process, and their results are part of the
+ * expansion cache key, so an env change is picked up without /rules reload.
+ */
+function evalImportIfCond(cond: string): CondResult {
+  let raw = cond.trim();
+  let negated = false;
+  if (raw.startsWith("!")) {
+    negated = true;
+    raw = raw.slice(1).trim();
+  }
+  let matched = false;
+  let detail = "";
+  if (raw.startsWith("os:")) {
+    const want = raw.slice(3).toLowerCase();
+    matched = process.platform === want;
+    detail = matched ? `platform is ${process.platform}` : `platform is ${process.platform}, wanted ${want}`;
+  } else if (raw.startsWith("env:")) {
+    const rest = raw.slice(4);
+    const eq = rest.indexOf("=");
+    if (eq === -1) {
+      const val = process.env[rest.trim()];
+      matched = val !== undefined && val !== "";
+      detail = matched ? `${rest} is set` : `${rest} is unset or empty`;
+    } else {
+      const name = rest.slice(0, eq).trim();
+      const value = rest.slice(eq + 1);
+      const actual = process.env[name];
+      matched = actual === value;
+      detail = matched ? `${name}=${value}` : `${name}=${actual === undefined ? "(unset)" : JSON.stringify(actual)}, wanted ${value}`;
+    }
+  } else {
+    return { valid: false, matched: false, detail: `invalid condition "${cond}"` };
+  }
+  return negated
+    ? { valid: true, matched: !matched, detail: `negated: ${detail}` }
+    : { valid: true, matched, detail };
+}
+
+/**
+ * Handle an @import-if directive: expand like @import when the condition matches;
+ * otherwise skip silently in the prompt text (the skip is visible in the report
+ * and the /rules show tree as a [skip] node).
+ */
+function expandImportIf(
+  cond: string,
+  spec: string,
+  sourceFile: string,
+  baseDir: string,
+  depth: number,
+  stack: Set<string>,
+  imported: Set<string>,
+  fileStats: Map<string, string | null>,
+  config: RulesConfig,
+  settings: AppliedSetting[],
+  conditions: Map<string, boolean>,
+  out: string[],
+  imports: ImportInfo[],
+  diagnostics: Diagnostic[],
+  nodeId: string,
+): RuleTreeNode | undefined {
+  const { valid, matched, detail } = evalImportIfCond(cond);
+  conditions.set(cond, matched);
+  if (matched) {
+    return expandImport(
+      spec, sourceFile, baseDir, depth, stack, imported, fileStats, config, settings,
+      conditions, out, imports, diagnostics, nodeId,
+      `@import-if ${cond}`,
+      `@import-if ${cond} ${spec}`,
+    );
+  }
+  const why = valid ? `condition not met (${detail})` : detail;
+  if (!valid) {
+    diagnostics.push({ level: "warning", message: `${sourceFile}: @import-if ${cond} ${spec} - ${detail}` });
+  }
+  imports.push({ spec: `@import-if ${cond} ${spec}`, status: "skip", detail: why, bytes: 0 });
+  return { id: nodeId, kind: "import", label: `@import-if ${cond} ${spec}`, status: "skip", meta: `skipped: ${why}` };
+}
+
+// ============================================================================
 // Import expansion
 // ============================================================================
 
@@ -546,6 +647,7 @@ function processDirectives(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
+  conditions: Map<string, boolean>, // @import-if results: cond -> matched (cache key part)
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
@@ -584,6 +686,14 @@ function processDirectives(
       applyRulesDirective(rules[2], sourceFile, config, settings, diagnostics);
       continue;
     }
+    const cif = /^(\s*)@import-if\s+(\S+)\s+(.+?)\s*$/.exec(line);
+    if (cif) {
+      flush(); // keep inline rules ordered before each import
+      const node = expandImportIf(cif[2], cif[3], sourceFile, baseDir, depth, stack, imported, fileStats, config, settings, conditions, out, imports, diagnostics, `${treeId}/imp:${seq.n}`);
+      seq.n++;
+      if (node) tree.push(node);
+      continue;
+    }
     const m = /^(\s*)@import\s+(.+?)\s*$/.exec(line);
     if (!m) {
       out.push(line);
@@ -591,7 +701,7 @@ function processDirectives(
       continue;
     }
     flush(); // keep inline rules ordered before each import
-    const node = expandImport(m[2], sourceFile, baseDir, depth, stack, imported, fileStats, config, settings, out, imports, diagnostics, `${treeId}/imp:${seq.n}`);
+    const node = expandImport(m[2], sourceFile, baseDir, depth, stack, imported, fileStats, config, settings, conditions, out, imports, diagnostics, `${treeId}/imp:${seq.n}`);
     seq.n++;
     if (node) tree.push(node);
   }
@@ -608,10 +718,13 @@ function expandImport(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
+  conditions: Map<string, boolean>,
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
   nodeId: string, // id of the import node itself
+  dirLabel: string = "@import", // directive shown in tree labels, e.g. "@import-if os:darwin"
+  impSpec: string = spec, // spec shown in the imports report; defaults keep plain @import output unchanged
 ): RuleTreeNode | undefined {
   const hashIdx = spec.indexOf("#");
   const pathPart = (hashIdx === -1 ? spec : spec.slice(0, hashIdx)).trim();
@@ -624,9 +737,9 @@ function expandImport(
     for (const d of dirs) fileStats.set(resolve(d), statKey(d)); // new files under the glob invalidate the cache
     if (files.length === 0) {
       diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} - glob matched no files` });
-      imports.push({ spec, status: "warning", detail: "glob matched no files", bytes: 0 });
+      imports.push({ spec: impSpec, status: "warning", detail: "glob matched no files", bytes: 0 });
       out.push(`[rules] skipped: ${spec} (glob matched no files)`);
-      return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "warning", meta: "glob matched no files" };
+      return { id: nodeId, kind: "import", label: `${dirLabel} ${spec}`, status: "warning", meta: "glob matched no files" };
     }
     const capped = files.length > config.maxGlobFiles;
     if (capped) {
@@ -641,7 +754,7 @@ function expandImport(
     const expanded = capped ? files.slice(0, config.maxGlobFiles) : files;
     for (let fi = 0; fi < expanded.length; fi++) {
       const f = expanded[fi];
-      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile, `${nodeId}/f:${fi}`);
+      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, `${nodeId}/f:${fi}`);
       if (r.ok) {
         out.push(r.text);
         total += r.bytes;
@@ -665,20 +778,20 @@ function expandImport(
     }
     const status = total > 0 ? (capped ? "warning" : "ok") : "error";
     const detail = capped ? `${expanded.length}/${files.length} file(s)` : `${files.length} file${files.length > 1 ? "s" : ""}`;
-    imports.push({ spec, status, detail, bytes: total });
+    imports.push({ spec: impSpec, status, detail, bytes: total });
     const meta = capped
       ? `${expanded.length}/${files.length} file(s) · ${fmtBytes(total)}`
       : `${files.length} file${files.length > 1 ? "s" : ""} · ${fmtBytes(total)}`;
-    return { id: nodeId, kind: "import", label: `@import ${spec}`, status, meta, children: childNodes };
+    return { id: nodeId, kind: "import", label: `${dirLabel} ${spec}`, status, meta, children: childNodes };
   }
 
   const p = resolveImportPath(pathPart, baseDir);
   fileStats.set(resolve(p), statKey(p));
-  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, diagnostics, sourceFile, nodeId);
+  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, nodeId);
   if (r.ok) {
     out.push(r.text);
-    imports.push({ spec, status: "ok", detail: anchor ? "section" : "whole file", bytes: r.bytes });
-    const node: RuleTreeNode = { id: nodeId, kind: "import", label: `@import ${spec}`, status: "ok", meta: `${anchor ? "section" : "whole file"} · ${fmtBytes(r.bytes)}` };
+    imports.push({ spec: impSpec, status: "ok", detail: anchor ? "section" : "whole file", bytes: r.bytes });
+    const node: RuleTreeNode = { id: nodeId, kind: "import", label: `${dirLabel} ${spec}`, status: "ok", meta: `${anchor ? "section" : "whole file"} · ${fmtBytes(r.bytes)}` };
     if (r.children.length > 0) {
       node.children = r.children;
     } else {
@@ -686,9 +799,9 @@ function expandImport(
     }
     return node;
   }
-  imports.push({ spec, status: "error", detail: r.reason, bytes: 0 });
+  imports.push({ spec: impSpec, status: "error", detail: r.reason, bytes: 0 });
   out.push(`[rules] skipped: ${spec} (${r.reason})`);
-  return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "error", meta: r.reason };
+  return { id: nodeId, kind: "import", label: `${dirLabel} ${spec}`, status: "error", meta: r.reason };
 }
 
 function expandFile(
@@ -700,6 +813,7 @@ function expandFile(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
+  conditions: Map<string, boolean>,
   diagnostics: Diagnostic[],
   sourceFile: string,
   nodeId: string, // id prefix for this file's subtree
@@ -754,6 +868,7 @@ function expandFile(
       fileStats,
       sectionConfig,
       settings,
+      conditions,
       out,
       [],
       diagnostics,
@@ -781,6 +896,7 @@ function expandFile(
     fileStats,
     fileConfig,
     settings,
+    conditions,
     out,
     nestedImports,
     diagnostics,
@@ -817,7 +933,7 @@ function computeExpansion(cwd: string): Expansion {
   let totalBytes = 0;
   const config = defaultConfig();
   const settings: AppliedSetting[] = [];
-
+  const conditions = new Map<string, boolean>();
   const candidates: { path: string; kind: "global" | "project" }[] = [
     { path: join(getAgentDir(), "RULES.md"), kind: "global" },
     { path: join(cwd, "RULES.md"), kind: "project" },
@@ -848,6 +964,7 @@ function computeExpansion(cwd: string): Expansion {
       fileStats,
       config,
       settings,
+      conditions,
       out,
       imports,
       diagnostics,
@@ -891,12 +1008,15 @@ function computeExpansion(cwd: string): Expansion {
       ? ""
       : `<rules_ground_truth>\n${PREAMBLE}\n\n${kept.join("\n\n")}\n</rules_ground_truth>`;
 
-  return { cwd, sources, diagnostics, totalBytes, generated, limits: config, settings, fileStats };
+  return { cwd, sources, diagnostics, totalBytes, generated, limits: config, settings, conditions, fileStats };
 }
 
 function cacheFresh(exp: Expansion): boolean {
   for (const [p, k] of exp.fileStats) {
     if (statKey(p) !== k) return false;
+  }
+  for (const [cond, matched] of exp.conditions) {
+    if (evalImportIfCond(cond).matched !== matched) return false;
   }
   return true;
 }
@@ -911,8 +1031,8 @@ function getExpansion(cwd: string): Expansion | undefined {
 // /rules command
 // ============================================================================
 
-function statusMark(status: "ok" | "error" | "warning"): string {
-  return status === "ok" ? "[ok]" : status === "error" ? "[err]" : "[warn]";
+function statusMark(status: "ok" | "error" | "warning" | "skip"): string {
+  return status === "ok" ? "[ok]" : status === "error" ? "[err]" : status === "warning" ? "[warn]" : "[skip]";
 }
 
 function buildReport(exp: Expansion | undefined): string[] {
