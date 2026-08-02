@@ -291,7 +291,7 @@ function applyRulesDirective(
 ): void {
   const m = /^(\S+)\s+(.+)$/.exec(spec.trim());
   if (!m) {
-    diagnostics.push({ level: "warning", message: `${sourceFile}: invalid @rules — expected "@rules <key> <value>"` });
+    diagnostics.push({ level: "warning", message: `${sourceFile}: invalid @rules - expected "@rules <key> <value>"` });
     return;
   }
   const key = m[1].toLowerCase().replace(/[_-]/g, "");
@@ -331,7 +331,7 @@ function applyRulesDirective(
     default:
       diagnostics.push({
         level: "warning",
-        message: `${sourceFile}: unknown @rules key "${m[1]}" — known: max_depth, max_glob_files, max_total_bytes`
+        message: `${sourceFile}: unknown @rules key "${m[1]}" - known: max_depth, max_glob_files, max_total_bytes`
       });
   }
 }
@@ -614,15 +614,14 @@ function expandImport(
     const { files } = globMatch(pathPart, baseDir);
     for (const f of files) fileStats.set(resolve(f), statKey(f));
     if (files.length === 0) {
-      diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} — glob matched no files` });
+      diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} - glob matched no files` });
       imports.push({ spec, status: "warning", detail: "glob matched no files", bytes: 0 });
       out.push(`[rules] skipped: ${spec} (glob matched no files)`);
       return { id: nodeId, kind: "import", label: `@import ${spec}`, status: "warning", meta: "glob matched no files" };
     }
     if (files.length > config.maxGlobFiles) {
       diagnostics.push({
-        level: "warning",
-        message: `${sourceFile}: @import ${spec} — ${files.length} matches (> ${config.maxGlobFiles})`,
+        message: `${sourceFile}: @import ${spec} - ${files.length} matches (> ${config.maxGlobFiles})`,
       });
     }
     let total = 0;
@@ -643,7 +642,7 @@ function expandImport(
         }
         childNodes.push(node);
       } else {
-        out.push(`[rules] skipped: ${spec} → ${displayPath(f)} (${r.reason})`);
+        out.push(`[rules] skipped: ${spec} - ${displayPath(f)} (${r.reason})`);
         childNodes.push({ id: `${nodeId}/f:${fi}`, kind: "import", label: relLabel(f), status: "error", meta: r.reason });
       }
     }
@@ -694,16 +693,16 @@ function expandFile(
   // settings inside an imported file affect only its own subtree
   const fileConfig = { ...config };
   if (depth > fileConfig.maxDepth) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} — max depth ${fileConfig.maxDepth} exceeded` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - max depth ${fileConfig.maxDepth} exceeded` });
     return { ok: false, reason: `max depth ${fileConfig.maxDepth} exceeded` };
   }
   if (stack.has(canonical)) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} — circular import` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - circular import` });
     return { ok: false, reason: "circular import" };
   }
   if (anchor === undefined && imported.has(canonical)) return { ok: false, reason: "already imported (deduped)" };
   if (!existsSync(canonical)) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} — file not found` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - file not found` });
     return { ok: false, reason: "file not found" };
   }
 
@@ -712,14 +711,14 @@ function expandFile(
   for (const w of warnings) {
     diagnostics.push({
       level: "warning",
-      message: `${sourceFile}: @import ${specLabel(p, anchor)} — line ${w.line}: ${w.message}`,
+      message: `${sourceFile}: @import ${specLabel(p, anchor)} - line ${w.line}: ${w.message}`,
     });
   }
 
   if (anchor !== undefined) {
     const { found, slice } = extractSection(noComments, anchor);
     if (!found) {
-      diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} — section not found` });
+      diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - section not found` });
       return { ok: false, reason: `section "#${anchor}" not found` };
     }
     return { ok: true, text: slice, bytes: slice.length, children: [] };
@@ -763,7 +762,7 @@ function specLabel(p: string, anchor: string | undefined): string {
 const PREAMBLE =
   "The following rules come from RULES.md, a user-maintained ground-truth file. " +
   "They are authoritative and stable: they change only when the user edits the file. " +
-  "If a rule conflicts with the code you observe, ask the user to clarify — do not modify the rules file yourself.";
+  "If a rule conflicts with the code you observe, ask the user to clarify - do not modify the rules file yourself.";
 
 let cache: Expansion | undefined;
 
@@ -857,7 +856,7 @@ function getExpansion(cwd: string): Expansion | undefined {
 // ============================================================================
 
 function statusMark(status: "ok" | "error" | "warning"): string {
-  return status === "ok" ? "✓" : status === "error" ? "✗" : "⚠";
+  return status === "ok" ? "[ok]" : status === "error" ? "[err]" : "[warn]";
 }
 
 function buildReport(exp: Expansion | undefined): string[] {
@@ -868,18 +867,18 @@ function buildReport(exp: Expansion | undefined): string[] {
     return lines;
   }
   lines.push(
-    `Rules: ${exp.sources.length} file(s) · expanded ${fmtBytes(exp.totalBytes)} · ~${Math.round(exp.totalBytes / 4)} tokens`,
+    `Rules: ${exp.sources.length} file(s) | expanded ${fmtBytes(exp.totalBytes)} | ~${Math.round(exp.totalBytes / 4)} tokens`,
   );
   lines.push(
-    `limits: depth ${exp.limits.maxDepth} · glob ≤ ${exp.limits.maxGlobFiles} files · total ≤ ${fmtBytes(exp.limits.maxTotalBytes)}` +
-    (exp.settings.length > 0 ? " · overridden in RULES.md" : " (defaults)"),
+    `limits: depth ${exp.limits.maxDepth} | glob <= ${exp.limits.maxGlobFiles} files | total <= ${fmtBytes(exp.limits.maxTotalBytes)}` +
+    (exp.settings.length > 0 ? " | overridden in RULES.md" : " (defaults)"),
   );
   lines.push("");
   for (const s of exp.sources) {
-    lines.push(`[${s.kind}]  ${s.path} — ${s.lines} lines · ${fmtBytes(s.bytes)}`);
+    lines.push(`[${s.kind}]  ${s.path} - ${s.lines} lines | ${fmtBytes(s.bytes)}`);
     for (const imp of s.imports) {
       lines.push(
-        `  ${statusMark(imp.status)} @import ${imp.spec} — ${imp.detail}${imp.bytes > 0 ? ` · ${fmtBytes(imp.bytes)}` : ""}`,
+        `  ${statusMark(imp.status)} @import ${imp.spec} - ${imp.detail}${imp.bytes > 0 ? ` | ${fmtBytes(imp.bytes)}` : ""}`,
       );
     }
   }
@@ -887,7 +886,7 @@ function buildReport(exp: Expansion | undefined): string[] {
     lines.push("");
     lines.push("Settings (from RULES.md):");
     for (const s of exp.settings) {
-      lines.push(`  ⚙ ${s.key} = ${s.value} (${s.source})`);
+      lines.push(`  - ${s.key} = ${s.value} (${s.source})`);
     }
   }
   if (exp.diagnostics.length > 0) {
@@ -899,7 +898,7 @@ function buildReport(exp: Expansion | undefined): string[] {
   const errs = exp.diagnostics.filter((d) => d.level === "error").length;
   const warns = exp.diagnostics.filter((d) => d.level === "warning").length;
   lines.push("");
-  lines.push(`${errs} error(s) · ${warns} warning(s)`);
+  lines.push(`${errs} error(s) | ${warns} warning(s)`);
   return lines;
 }
 
@@ -1192,7 +1191,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
       "Manage RULES.md ground-truth rules: show a collapsible rules tree in a window, init a template, reload into the system prompt",
     getArgumentCompletions: async (prefix) => {
       const opts = [
-        { value: "show", label: "show", description: "Show rules as a tree in a window (← fold, → unfold, Enter toggle, full = full screen, Esc closes)" },
+        { value: "show", label: "show", description: "Show rules as a tree in a window (Left/Right fold/unfold, Enter toggle, full = full screen, Esc closes)" },
         { value: "init", label: "init", description: "Create a RULES.md template (--force overwrites, -g writes global)" },
         { value: "reload", label: "reload", description: "Re-read RULES.md files and rebuild the system prompt" },
       ];
@@ -1213,7 +1212,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         }
         const tree = buildRuleTree(exp);
         if (tree.roots.length === 0) {
-          ctx.ui.notify("No RULES.md found — run /rules init to create a template", "error");
+          ctx.ui.notify("No RULES.md found - run /rules init to create a template", "error");
           return;
         }
         if (typeof ctx.ui.custom !== "function") {
@@ -1259,22 +1258,22 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         const global = argv.includes("-g") || argv.includes("--global");
         const target = global ? join(getAgentDir(), "RULES.md") : join(ctx.cwd, "RULES.md");
         if (existsSync(target) && !force) {
-          ctx.ui.notify(`RULES.md already exists at ${displayPath(target)} — use --force to overwrite`, "error");
+          ctx.ui.notify(`RULES.md already exists at ${displayPath(target)} - use --force to overwrite`, "error");
           return;
         }
         writeFileSync(target, TEMPLATE);
-        ctx.ui.notify(`Created ${displayPath(target)} — run /rules reload to apply`, "info");
+        ctx.ui.notify(`Created ${displayPath(target)} - run /rules reload to apply`, "info");
         return;
       }
 
       if (cmd === "reload") {
         cache = undefined;
-        ctx.ui.notify("Reloading rules and resources…", "info");
+        ctx.ui.notify("Reloading rules and resources...", "info");
         await ctx.reload();
         return;
       }
 
-      ctx.ui.notify(`Unknown subcommand "${cmd}" — use show | init | reload`, "error");
+      ctx.ui.notify(`Unknown subcommand "${cmd}" - use show | init | reload`, "error");
     },
   });
 }
