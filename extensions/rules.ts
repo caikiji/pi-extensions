@@ -108,7 +108,40 @@ const TEMPLATE = `<!-- =========================================================
 - 本仓库的最终目标是拆成独立 npm 包
 -->
 
-<!-- ===== Imports (stable pointers to curated documents) ===== -->
+<!-- ===== Commit style ===== -->
+<!-- ===== 提交规范 ===== -->
+
+<!-- Example / 示例：
+- Commit messages are always English (summary and body)
+- 提交信息一律英文（summary 和 body 都是）
+- Format: \`type(scope): summary\`, e.g. \`feat(rules): add @rules directive\`
+- 格式：\`type(scope): summary\`，如 \`feat(rules): add @rules directive\`
+- type: feat / fix / refactor / docs / test / chore / style only
+- type 只用：feat / fix / refactor / docs / test / chore / style
+- summary is imperative (Add / Fix / Update / Remove...), at most 72 chars
+- summary 用祈使句（Add / Fix / Update / Remove...），不超过 72 字符
+- One commit does one thing; both \`npm test\` and \`npm run lint\` must pass first
+- 一个提交只做一件事；\`npm test\` 和 \`npm run lint\` 都通过后才提交
+- Never commit runtime artifacts like tests/.work or node_modules
+- 不提交 tests/.work、node_modules 等运行时产物
+-->
+
+<!-- ===== Versioning ===== -->
+<!-- ===== 版本号规则 ===== -->
+
+<!-- Example / 示例：
+- Check package.json version before committing; bump in the same commit as the change
+- 提交前检查 package.json 的 version，需要 bump 时与改动同一提交推送
+- feat -> minor bump (0.0.2 -> 0.1.0)
+- feat → minor 递增（0.0.2 → 0.1.0）
+- fix / refactor / style / test -> patch bump (0.0.2 -> 0.0.3)
+- fix / refactor / style / test → patch 递增（0.0.2 → 0.0.3）
+- docs / chore -> no bump (docs-only or housekeeping)
+- docs / chore → 不改版本号（仅文档或杂务时无需 bump）
+- Versions only go up; releases are tagged (e.g. v0.0.2)
+- 版本号只增不减；发布用 git tag 标记（如 v0.0.2）
+-->
+
 <!-- ===== 导入（指向你选定维护的文档的稳定指针） ===== -->
 
 <!-- Example / 示例：
