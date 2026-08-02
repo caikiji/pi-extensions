@@ -402,7 +402,8 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 	}
 	// The model closes with a "Title: ..." line; strip it and use it as the
 	// new session's display name (the goal is the fallback).
-	return parseTitle(result, goal);
+	const { title, body } = parseTitle(result, goal);
+	return { prompt: body, title };
 }
 
 /** Auto-save the generated prompt; returns the repo-relative path for display. */
