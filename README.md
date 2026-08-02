@@ -6,51 +6,28 @@ Personal [pi](https://github.com/earendil-works/pi) extensions.
 
 | 扩展 | 说明 |
 |------|------|
-| handoff | 按目标提取当前会话关键上下文，生成可编辑的提示词并开新会话。相比 compact：针对性强、可审阅、父会话保留可回溯；交接单聚焦未完成状态与下一步，生成语言跟随目标。`/handoff`（无参）弹目标编辑框，回车执行；每次生成静默存档到 `.pi/handoffs/`（front matter 记目标/标题/时间/来源会话/模型），审阅取消即留档；`/handoff list` 打开草案选择器（输入即过滤 + 元信息面板，Enter 弹 Load / Edit / Delete，**左方向键退回上一级**，删除确认默认焦点在 Cancel，Esc 整体退出）；新会话自动命名（生成末尾的 `Title:` 行，严格约束单行 ≤60 字符，goal 兜底） |
-| rules | RULES.md 恒真规则管理器：`/rules show` `/rules init` `/rules reload`；`@import` 精细导入（单文件 / `#标题` / glob / 递归 5 层 / 防环去重），`@import-if` 条件导入（os: 平台 / env: 变量 / env: 变量=值 / has: 路径存在，`!` 取反，不满足静默跳过记为 [skip]），项目 RULES.md 从工作目录向上逐级查找（全部生效，就近优先），`@rules` 可配置参数，`&lt;!-- --&gt;` 注释剥离，结果注入 system prompt；TUI 下 `show` 以可折叠规则树展示（↑↓ 选择，← 折叠 / → 展开 / Enter 切换，叶子为具体规则行，imports / Settings / Diagnostics 默认折叠） |
+| handoff | 提取会话上下文生成提示词开新会话；`/handoff` 生成，`/handoff list` 管理草稿 |
+| rules | RULES.md 规则管理器：`/rules show\|init\|reload`、`@import` / `@import-if` 导入、注入 system prompt |
 
 ## 安装
 
-作为 pi package 安装：
-
 ```bash
-# 本地路径
-pi install /path/to/pi-extensions
-
-# git 仓库
-pi install git:github.com/caikiji/pi-extensions@main
-
-# 仅安装到项目
-pi install -l git:github.com/caikiji/pi-extensions@main
+pi install /path/to/pi-extensions                  # 本地路径
+pi install git:github.com/caikiji/pi-extensions@main  # git 仓库
+pi install -l git:github.com/caikiji/pi-extensions@main  # 仅项目
 ```
 
-临时测试单个扩展：
-
-```bash
-pi -e ./extensions/handoff.ts
-pi -e ./extensions/rules.ts
-```
+临时测试单个扩展：`pi -e ./extensions/handoff.ts`
 
 ## 测试
 
-一键跑 `tests/` 下所有 `*.test.mjs`（每个测试独立子进程，互不干扰）：
-
 ```bash
-npm test
-# 或直接：
-node tests/run-all.mjs
-# 按文件名过滤：
-node tests/run-all.mjs rules
+npm test                      # 跑 tests/*.test.mjs，各测试独立子进程
+node tests/run-all.mjs rules  # 或直接跑，支持按文件名过滤
 ```
+
+`npm test` 用 Node 原生类型剥离直接跑，无需 node_modules。
 
 ## 开发：类型检查
 
-`npm test` 用 Node 原生类型剥离直接跑，不需要 node_modules；tsconfig 只服务于编辑器/tsc 的静态检查。扩展里的 `@earendil-works/*` / `typebox` 在运行时由 pi 自身的加载器解析（jiti alias / virtual modules），不走 node_modules；类型层面由 package.json 的 peerDependencies / devDependencies 声明（npm 7+ 自动安装 peer）。
-
-需要完整 IDE 类型提示或 `tsc --noEmit` 时，装一次依赖即可（node_modules 已 gitignore，不提交）：
-
-```bash
-npm install
-```
-
-之后 `moduleResolution: NodeNext` 走标准 node_modules 查找，`@earendil-works/*` 和 `typebox` 全部可解析，无需任何机器相关的 `paths` 配置。
+扩展里的 `@earendil-works/*` / `typebox` 运行时由 pi 加载器解析，不走 node_modules。需要 IDE 类型提示或 `tsc --noEmit` 时执行一次 `npm install`（node_modules 已 gitignore，不提交）。
