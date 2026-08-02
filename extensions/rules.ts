@@ -647,10 +647,10 @@ function expandImport(
         total += r.bytes;
         // one node per matched file: keeps attribution when the glob spans files
         const node: RuleTreeNode = { id: `${nodeId}/f:${fi}`, kind: "import", label: relLabel(f), meta: fmtBytes(r.bytes) };
-        if (anchor !== undefined) {
-          node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-        } else {
+        if (r.children.length > 0) {
           node.children = r.children;
+        } else {
+          node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
         }
         childNodes.push(node);
       } else {
@@ -679,10 +679,10 @@ function expandImport(
     out.push(r.text);
     imports.push({ spec, status: "ok", detail: anchor ? "section" : "whole file", bytes: r.bytes });
     const node: RuleTreeNode = { id: nodeId, kind: "import", label: `@import ${spec}`, status: "ok", meta: `${anchor ? "section" : "whole file"} · ${fmtBytes(r.bytes)}` };
-    if (anchor !== undefined) {
-      node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    } else {
+    if (r.children.length > 0) {
       node.children = r.children;
+    } else {
+      node.lines = r.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
     }
     return node;
   }
@@ -737,7 +737,33 @@ function expandFile(
       diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - section not found` });
       return { ok: false, reason: `section "#${anchor}" not found` };
     }
-    return { ok: true, text: slice, bytes: slice.length, children: [] };
+    // Sections process directives like whole files: nested @import expands
+    // (re-entering this file mid-expansion is caught as circular), and
+    // @rules inside the section affect only its own subtree.
+    const sectionConfig = { ...config };
+    stack.add(canonical);
+    const out: string[] = [];
+    const children: RuleTreeNode[] = [];
+    processDirectives(
+      slice.split("\n"),
+      sourceFile,
+      dirname(canonical),
+      depth,
+      stack,
+      imported,
+      fileStats,
+      sectionConfig,
+      settings,
+      out,
+      [],
+      diagnostics,
+      children,
+      nodeId,
+      { n: 0 },
+    );
+    stack.delete(canonical);
+    const text = out.join("\n");
+    return { ok: true, text, bytes: text.length, children };
   }
 
   stack.add(canonical);

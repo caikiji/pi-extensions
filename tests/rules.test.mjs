@@ -444,6 +444,42 @@ console.log("Test 16: new files matching a glob invalidate the cache");
   assert(g6.includes("- arrived"), "later-created glob dir picked up");
 }
 
+// ================= Test 17: section imports expand nested directives ==========
+console.log("Test 17: section imports expand nested @import/@rules");
+{
+  writeFileSync(join(TMP, "docs/sections.md"), [
+    "# Sections",
+    "",
+    "## Data",
+    "",
+    "@import patterns/one.md",
+    "",
+    "- local rule",
+    "",
+    "## Other",
+    "",
+    "- untouched",
+  ].join("\n"));
+  writeFileSync(join(TMP, "RULES.md"), "@import docs/sections.md#Data\n");
+  const g = (await inject(TMP)).systemPrompt;
+  assert(g.includes("- p1"), "nested import inside the section expanded");
+  assert(g.includes("- local rule"), "section content kept");
+  assert(!g.includes("- untouched"), "other sections not included");
+  assert(!g.includes("@import patterns/one.md"), "directive line consumed, not left literal");
+
+  // cycles through sections are detected
+  writeFileSync(join(TMP, "cyc.md"), "## S\n\n@import cyc.md#S\n");
+  writeFileSync(join(TMP, "RULES.md"), "@import cyc.md#S\n");
+  const g2 = (await inject(TMP)).systemPrompt;
+  assert(g2.includes("circular import"), "section self-import reported as circular");
+
+  // @rules inside a section apply only to the section subtree
+  writeFileSync(join(TMP, "sec.md"), "## S\n\n@rules max_depth 1\n@import r1.md\n");
+  writeFileSync(join(TMP, "RULES.md"), "@import sec.md#S\n");
+  const g3 = (await inject(TMP)).systemPrompt;
+  assert(g3.includes("max depth 1 exceeded"), "section-local limit applied");
+}
+
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
