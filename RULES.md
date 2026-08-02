@@ -99,7 +99,7 @@
 - 格式：`type(scope): summary`，如 `feat(rules): add @rules directive`
 - type 只用：feat / fix / refactor / docs / test / chore / style
 - summary 用祈使句（Add / Fix / Update / Remove...），不超过 72 字符
-- 一个提交只做一件事；`npm test` 通过后才提交
+- 一个提交只做一件事；`npm test` 和 `npm run lint` 都通过后才提交
 - 不提交 tests/.work、node_modules 等运行时产物
 
 ## 版本号规则 (versioning)
