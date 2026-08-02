@@ -555,7 +555,7 @@ function docBlockAbove(lines: string[], lineIdx: number): string | undefined {
 			}
 			break;
 		}
-	if (t.startsWith("//") || t.startsWith("#")) {
+		if (t.startsWith("//") || t.startsWith("#")) {
 		const text = t.replace(/^\/\/\s*/, "").replace(/^#\s*/, "");
 		if (/^[=\-*~#\s]+$/.test(text)) {
 			i--;
@@ -580,13 +580,13 @@ function docBlockAbove(lines: string[], lineIdx: number): string | undefined {
 		}
 		break;
 	}
-/** Decorative banner lines ("// ==== ... ====") must not become descriptions. */
-function isDecorative(s: string): boolean {
-	const t = s.trim();
-	if (t.length < 2) return false;
-	const edge = /[=\-*~#]/;
-	return edge.test(t[0]) && edge.test(t[t.length - 1]);
-}
+	/** Decorative banner lines ("// ==== ... ====") must not become descriptions. */
+	function isDecorative(s: string): boolean {
+		const t = s.trim();
+		if (t.length < 2) return false;
+		const edge = /[=\-*~#]/;
+		return edge.test(t[0]) && edge.test(t[t.length - 1]);
+	}
 
 	// The first non-empty, non-decorative collected line is the summary (top of the block).
 	for (const line of collected) {
@@ -894,11 +894,11 @@ function extractJson(lines: string[]): SkimSymbol[] {
 			let endLine = i;
 			if (value.startsWith("{")) {
 				kind = "object";
-				const close = scanBalanced(lines, i, "{", "}", line.indexOf("{"));
+				const close = scanBalanced(lines, i, "{", "}", line.indexOf("{", colonAt + 1));
 				endLine = close === -1 ? i : close;
 			} else if (value.startsWith("[")) {
 				kind = "array";
-				const close = scanBalanced(lines, i, "[", "]", line.indexOf("["));
+				const close = scanBalanced(lines, i, "[", "]", line.indexOf("[", colonAt + 1));
 				endLine = close === -1 ? i : close;
 			} else if (value.startsWith('"')) kind = "string";
 			else if (/^-?\d/.test(value)) kind = "number";
@@ -959,6 +959,7 @@ export function detectLang(file: string): string {
 function confidenceNote(file: SkimFile): string {
 	if (file.lang === "unknown") return "low-confidence: chunk outline (unknown language)";
 	if (file.symbols.length > 0 && file.symbols.every((s) => s.kind === "chunk")) return "low-confidence: chunk outline";
+	if (file.lang === "json" && file.symbols.length === 0) return "low-confidence: no top-level object keys";
 	if (file.lines >= 100 && file.symbols.length <= 2) return "low-confidence: sparse outline";
 	return "";
 }
@@ -1246,7 +1247,7 @@ export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: nu
 	const shown = truncated ? syms.slice(0, limit) : syms;
 
 	const conf = file.confidence ? ` | ${file.confidence}` : "";
-	const header = `${basename(file.path)} (${file.lines} lines | ${fmtBytes(file.bytes)} | ~${estimateTokens(file.bytes)} tok | ${shown.length} symbol${shown.length === 1 ? "" : "s"}${conf})`;
+	const header = `${basename(file.path)} (${file.lines} lines | ${fmtBytes(file.bytes)} | ~${estimateTokens(file.bytes)} tok | ${syms.length} symbol${syms.length === 1 ? "" : "s"}${conf})`;
 	const rows = shown.map((s) => {
 		const label = KIND_LABEL[s.kind] ?? s.kind;
 		const prefix = s.depth === 0 ? "|- " : `${"  ".repeat(s.depth)}|- `;
@@ -1262,7 +1263,8 @@ export function formatOutline(file: SkimFile, opts: { full?: boolean; limit?: nu
 		}
 		return row;
 	});
-	const tail = truncated ? `\n... +${syms.length - limit} more symbols (use --filter or --full)` : "";
+	const noMatch = filter !== null && syms.length === 0;
+	const tail = noMatch ? `\n(no symbols match filter: ${opts.filter})` : truncated ? `\n... +${syms.length - limit} more symbols (use --filter or --full)` : "";
 	return [header, ...rows].join("\n") + tail;
 }
 
@@ -1496,6 +1498,8 @@ export async function runSkim(params: SkimParams, cwd: string): Promise<string> 
 	const p = params.path;
 	const globChars = /[*?]/.test(p);
 	if (globChars) {
+		if (params.read) return "read is not supported with a glob: use a single path";
+		if (params.json) return "json is not supported with a glob: use a single path";
 		const matches = expandGlob(p, cwd);
 		if (matches.length === 0) return `no files match: ${p}`;
 		if (matches.length > 20) {

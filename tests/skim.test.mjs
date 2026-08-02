@@ -519,6 +519,27 @@ console.log("Test 18: readSymbol line mode — only same-line block opens");
 	assert(r3 !== null && r3.endLine === 3, `return-type header reads whole body (got ${r3?.endLine})`);
 }
 
+// ================= Test 19: P3 polish =================
+console.log("Test 19: glob param guards, filter hint, header count, json edges");
+{
+	const globRead = await mod.runSkim({ path: "src/*.ts", read: "x" }, TMP);
+	assert(globRead.includes("not supported with a glob"), "--read with glob errors clearly");
+	const globJson = await mod.runSkim({ path: "src/*.ts", json: true }, TMP);
+	assert(globJson.includes("not supported with a glob"), "--json with glob errors clearly");
+	const file = { path: "x.ts", lang: "ts", lines: 3, bytes: 60, symbols: [{ name: "alpha", kind: "function", line: 1, endLine: 3, depth: 0 }] };
+	const noMatch = mod.formatOutline(file, { filter: "zzz" });
+	assert(noMatch.includes("no symbols match filter"), "filter with no hits hints");
+	const big = { path: "big.ts", lang: "ts", lines: 200, bytes: 4800, symbols: Array.from({ length: 200 }, (_, k) => ({ name: `c${k}`, kind: "const", line: k + 1, endLine: k + 1, depth: 0 })) };
+	const head = mod.formatOutline(big, {}).split("\n")[0];
+	assert(head.includes("200 symbols"), `header shows total count (got ${head})`);
+	const j1 = ["{", '  "{a}": { "b": 1 },', '  "c": [1, 2]', "}"].join("\n").split("\n");
+	const js = mod.outlineFor(j1, "json");
+	assert(js.length === 2 && js[0].name === "{a}" && js[0].kind === "object" && js[0].endLine === 2, `json key with brace still spans right (got ${JSON.stringify(js)})`);
+	writeFileSync(join(TMP, "arr.json"), "[\n  { \"a\": 1 }\n]");
+	const arr = mod.skimFile(join(TMP, "arr.json"));
+	assert(arr.confidence.includes("low-confidence"), `root-array json flagged (got ${arr.confidence})`);
+}
+
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
