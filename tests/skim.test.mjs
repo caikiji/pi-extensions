@@ -409,6 +409,116 @@ console.log("Test 15: git change annotation — [changed +N/-M] on modified symb
 	const ch3 = mod.gitSymbolChanges(f3.symbols, join(TMP, "src", "index.ts"));
 	assert(ch3.size === 0, "untracked file -> empty changes (graceful degradation)");
 }
+// ================= Test 16: scanner fixes =================
+console.log("Test 16: scanner fixes — keyword regexes, nested templates, arrow fields");
+{
+	// regex literal after `return` with an unpaired brace must not corrupt spans
+	const src = [
+		"function f() {",
+		'  return /\\{/.test(s);',
+		"}",
+		"function g() {",
+		"  const x = 1;",
+		"}",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const f = syms.find((s) => s.name === "f");
+	const g = syms.find((s) => s.name === "g");
+	assert(f.endLine === 3, `return /\\{/ does not swallow the file (f spans 1-${f.endLine})`);
+	assert(g.line === 4 && g.endLine === 6, `g starts after f (got ${g.line}-${g.endLine})`);
+	// division still treats / as an operator
+	const div = ["function h() {", "  return a / b / c;", "}"].join("\n").split("\n");
+	const hs = mod.outlineFor(div, "ts");
+	assert(hs[0].endLine === 3, `division does not break spans (got ${hs[0].endLine})`);
+	// template literal with nested backticks + object literal in interpolation
+	const tpl = [
+		"const s = `a ${g({k:1})} b`;",
+		"function h() {",
+		"  return 1;",
+		"}",
+	].join("\n").split("\n");
+	const tsyms = mod.outlineFor(tpl, "ts");
+	const s = tsyms.find((x) => x.name === "s");
+	const h = tsyms.find((x) => x.name === "h");
+	assert(s.endLine === 1, `template literal const spans only its line (got 1-${s.endLine})`);
+	assert(h.line === 2 && h.endLine === 4, `function after template intact (got ${h.line}-${h.endLine})`);
+	}
+
+// ================= Test 17: declaration gaps =================
+console.log("Test 17: declaration gaps — destructuring, anonymous defaults, arrow fields");
+{
+	const src = [
+		"export const { a, b } = useFoo();",
+		"const [c, d] = list;",
+		"export const y = 1;",
+	].join("\n").split("\n");
+	const syms = mod.outlineFor(src, "ts");
+	const names = syms.map((s) => `${s.name}:${s.kind}`);
+	assert(names.join("|") === "a:const|c:const|y:const", `destructured consts listed (got ${names.join("|")})`);
+	// multi-line destructuring takes its first binding as the name
+	const multi = [
+		"const {",
+		"  alpha,",
+		"  beta,",
+		"} = useFoo();",
+	].join("\n").split("\n");
+	const ms = mod.outlineFor(multi, "ts");
+	assert(ms.length === 1 && ms[0].name === "alpha" && ms[0].kind === "const" && ms[0].endLine === 4, `multi-line destructure named alpha 1-4 (got ${ms[0]?.name} ${ms[0]?.line}-${ms[0]?.endLine})`);
+	// anonymous default exports: class extends / arrow
+	const anon = [
+		"export default class extends Base {}",
+		"export default (props) => {",
+		"  return <div/>;",
+		"};",
+	].join("\n").split("\n");
+	const as = mod.outlineFor(anon, "ts");
+	const def1 = as[0];
+	assert(def1.name === "default" && def1.kind === "class", `anon class -> default:class (got ${def1.name}:${def1.kind})`);
+	const def2 = as.find((s) => s.kind === "function");
+	assert(def2 !== undefined && def2.name === "default" && def2.endLine === 4, `default arrow -> default:function 1-4 (got ${def2?.name} ${def2?.line}-${def2?.endLine})`);
+	// class arrow-field methods are recognized with correct spans
+	const cls = [
+		"class C {",
+		"  count = 0;",
+		"  onClick = (e) => {",
+		"    this.count++;",
+		"  };",
+		"  static make() {",
+		"    return new C();",
+		"  }",
+		"}",
+	].join("\n").split("\n");
+	const cs = mod.outlineFor(cls, "ts");
+	const onClick = cs.find((x) => x.name === "onClick");
+	const make = cs.find((x) => x.name === "make");
+	assert(onClick !== undefined && onClick.kind === "method" && onClick.line === 3 && onClick.endLine === 5, `arrow field method 3-5 (got ${onClick?.line}-${onClick?.endLine})`);
+	assert(make !== undefined && make.line === 6 && make.endLine === 8, `static method 6-8 (got ${make?.line}-${make?.endLine})`);
+}
+
+// ================= Test 18: read line-mode boundaries =================
+console.log("Test 18: readSymbol line mode — only same-line block opens");
+{
+	const src = [
+		"const a = 1;",
+		"function bar() {",
+		"  const b = 2;",
+		"  return b;",
+		"}",
+	].join("\n").split("\n");
+	const r1 = mod.readSymbol(src, "ts", 1);
+	assert(r1 !== null && r1.line === 1 && r1.endLine === 1, `plain statement line reads one line (got ${r1?.line}-${r1?.endLine})`);
+	const r2 = mod.readSymbol(src, "ts", 2);
+	assert(r2 !== null && r2.line === 2 && r2.endLine === 5, `brace line reads its block (got ${r2?.line}-${r2?.endLine})`);
+	// return-type braces on the header still read the whole body
+	const rt = [
+		"function f(): { ok: boolean } {",
+		"  return { ok: true };",
+		"}",
+	].join("\n").split("\n");
+	const r3 = mod.readSymbol(rt, "ts", 1);
+	assert(r3 !== null && r3.endLine === 3, `return-type header reads whole body (got ${r3?.endLine})`);
+}
+
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

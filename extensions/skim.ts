@@ -15,8 +15,8 @@
  *   skim file.ts --json             machine-readable outline
  *
  * v1 scope: regex-based extraction (no tree-sitter). Braces are balanced with
- * a string/comment-aware scanner; template-literal `${...}` bodies are treated
- * as string content (acceptable approximation). Files > 1 MB are rejected.
+ * a string/comment-aware scanner; template-literal `${...}` interpolation bodies
+ * are scanned as code (braces balanced per interpolation). Files > 1 MB are rejected.
  * Unknown extensions fall back to a blank-line chunk outline; low-confidence
  * outlines are flagged in the header so the agent prefers read over trusting
  * a possibly-incomplete symbol list. When the file is inside a git repo,
@@ -88,6 +88,7 @@ export interface ReadResult {
 
 interface LangPatterns {
 	decl: RegExp; // top-level declaration line
+	destructure?: RegExp; // TS/JS: const { a, b } = ... / const [a, b] = ...
 	anonDefault: RegExp; // e.g. `export default function (` without a name
 	method: RegExp; // method-like line (inside class spans)
 	methodBlacklist: RegExp; // control keywords that must not count as methods
@@ -103,13 +104,16 @@ const METHOD_BLACKLIST =
 
 function tsPatterns(): LangPatterns {
 	return {
-		decl: /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:function\s*\*?\s+|class\s+|interface\s+|type\s+|enum\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/,
-		anonDefault: /^export\s+default\s+(?:async\s+)?function\s*\(/,
-		method: /^(?:(?:public|private|protected|static|readonly|async|get|set|\*)\s+)*(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(/,
+		decl: /^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:function\s*\*?\s+|class\s+(?!extends\b)|interface\s+|type\s+|enum\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/,
+		destructure: /^(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+[{[]\s*([A-Za-z_$][\w$]*)?(?:[\s,}\]]|$)/,
+		// `export default` without a name: function (`export default function (`),
+		// arrow (`export default (x) =>`), or anonymous class (`class {` / `class extends`).
+		anonDefault: /^export\s+default\s+(?:async\s+)?(?:function\s*\(|class\s*(?:extends\b|\{|\s*$)|\s*\([^)]*\)\s*=>)/,
+		method: /^(?:(?:public|private|protected|static|readonly|async|get|set|\*)\s+)*(?:(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(|([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)/,
 		methodBlacklist: METHOD_BLACKLIST,
 		reexport: /^export\s+(?:type\s+)?(?:\*\s+as\s+[A-Za-z_$][\w$]*\s+from\s+|\*\s+from\s+|{[^}]*}\s+from\s+)["'][^"']+["']/,
 
-		nameOf: (m) => m[1],
+		nameOf: (m) => m[1] ?? m[2],
 		kindOf: (m, line) => {
 			// Strip every leading modifier (export default async ...) so the first
 			// remaining keyword decides the kind.
@@ -258,12 +262,26 @@ function patternsFor(lang: string): LangPatterns | undefined {
 // ============================================================================
 // Scanner: string/comment-aware brace balancing
 // Regex-literal skip: `/.../` at expression position, handling escapes and [classes].
+const REGEX_OPERAND_KEYWORDS = new Set([
+	"return", "throw", "case", "typeof", "instanceof", "in", "of",
+	"delete", "void", "yield", "await", "new", "do", "else",
+]);
+
 function skipRegexLiteral(line: string, j: number): number {
 	if (line[j] !== "/") return -1;
-	// A `/` preceded by an identifier/quote/close-bracket is division, not a regex.
+	// A `/` preceded by an identifier/quote/close-bracket is division, not a
+	// regex — unless the identifier is a keyword that expects an operand
+	// (`return /re/`, `throw /re/`, `typeof /re/`, ...).
 	let k = j - 1;
 	while (k >= 0 && /\s/.test(line[k])) k--;
-	if (k >= 0 && /[A-Za-z0-9_$)\]}"'`]/.test(line[k])) return -1;
+	if (k >= 0 && /[A-Za-z0-9_$]/.test(line[k])) {
+		let s = k;
+		while (s > 0 && /[A-Za-z0-9_$]/.test(line[s - 1])) s--;
+		if (!REGEX_OPERAND_KEYWORDS.has(line.slice(s, k + 1))) return -1;
+	} else if (k >= 0 && /[)\]}"'`]/.test(line[k])) {
+		return -1;
+	}
+
 	let inClass = false;
 	for (let i = j + 1; i < line.length; i++) {
 		const c = line[i];
@@ -284,6 +302,9 @@ function scanBalanced(lines: string[], start: number, open: string, close: strin
 	let inStr = false;
 	let strCh = "";
 	let inBlock = false;
+	// Open template interpolations: each frame counts braces inside `${...}`
+	// so a `}` closes either the innermost code brace or the interpolation.
+	const tmpl: { brace: number }[] = [];
 	for (let i = start; i < lines.length; i++) {
 		const line = lines[i];
 		let j = i === start ? colStart : 0;
@@ -305,6 +326,13 @@ function scanBalanced(lines: string[], start: number, open: string, close: strin
 					continue;
 				}
 				if (c === strCh) inStr = false;
+				else if (strCh === "`" && c === "$" && n === "{") {
+					// `${...}` inside a template literal: its body is code, not string.
+					tmpl.push({ brace: 0 });
+					inStr = false;
+					j += 2;
+					continue;
+				}
 				j++;
 				continue;
 			}
@@ -327,10 +355,23 @@ function scanBalanced(lines: string[], start: number, open: string, close: strin
 					continue;
 				}
 			}
-			if (c === open) depth++;
-			else if (c === close) {
-				depth--;
-				if (depth === 0) return i;
+			if (c === open) {
+				if (tmpl.length > 0) tmpl[tmpl.length - 1].brace++;
+				else depth++;
+			} else if (c === close) {
+				if (tmpl.length > 0) {
+					const top = tmpl[tmpl.length - 1];
+					if (top.brace > 0) top.brace--;
+					else {
+						// Closing a `${...}` interpolation: back inside the template string.
+						tmpl.pop();
+						inStr = true;
+						strCh = "`";
+					}
+				} else {
+					depth--;
+					if (depth === 0) return i;
+				}
 			}
 			j++;
 		}
@@ -349,6 +390,7 @@ function findBodyBrace(lines: string[], start: number, maxScan: number): { line:
 	let inStr = false;
 	let strCh = "";
 	let inBlock = false;
+	const tmpl: { brace: number }[] = [];
 	for (let i = start; i < end; i++) {
 		const line = lines[i];
 		let j = 0;
@@ -370,6 +412,12 @@ function findBodyBrace(lines: string[], start: number, maxScan: number): { line:
 					continue;
 				}
 				if (c === strCh) inStr = false;
+				else if (strCh === "`" && c === "$" && n === "{") {
+					tmpl.push({ brace: 0 });
+					inStr = false;
+					j += 2;
+					continue;
+				}
 				j++;
 				continue;
 			}
@@ -392,7 +440,10 @@ function findBodyBrace(lines: string[], start: number, maxScan: number): { line:
 					continue;
 				}
 			}
-			if (c === "{") candidates.push({ line: i, col: j });
+			if (c === "{") {
+				// Braces inside `${...}` balance within their frame, not candidates.
+				if (tmpl.length === 0) candidates.push({ line: i, col: j });
+			}
 			j++;
 		}
 	}
@@ -404,7 +455,7 @@ function findBodyBrace(lines: string[], start: number, maxScan: number): { line:
 	for (const c of candidates) {
 		const close = scanBalanced(lines, c.line, "{", "}", c.col);
 		if (close === -1) return c;
-		if (lines[close].trimEnd().endsWith("}")) return c;
+		if (lines[close].trimEnd().endsWith("}") || lines[close].trimEnd().endsWith(";")) return c;
 	}
 	return candidates[0];
 }
@@ -416,6 +467,7 @@ function findInlineBrace(lines: string[], start: number, maxScan: number): { lin
 	let inStr = false;
 	let strCh = "";
 	let inBlock = false;
+	const tmpl: { brace: number }[] = [];
 	for (let i = start; i < end; i++) {
 		const line = lines[i];
 		let j = 0;
@@ -437,6 +489,12 @@ function findInlineBrace(lines: string[], start: number, maxScan: number): { lin
 					continue;
 				}
 				if (c === strCh) inStr = false;
+				else if (strCh === "`" && c === "$" && n === "{") {
+					tmpl.push({ brace: 0 });
+					inStr = false;
+					j += 2;
+					continue;
+				}
 				j++;
 				continue;
 			}
@@ -452,7 +510,10 @@ function findInlineBrace(lines: string[], start: number, maxScan: number): { lin
 				j++;
 				continue;
 			}
-			if (c === "{") return { line: i, col: j };
+			if (c === "{") {
+				// Interpolation braces are not declaration/block braces.
+				if (tmpl.length === 0) return { line: i, col: j };
+			}
 			j++;
 		}
 	}
@@ -554,7 +615,7 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 		const indent = indentOf(line);
 		const body = line.trim();
 		if (!body) continue;
-		if (patterns.decl.test(body) || patterns.anonDefault.test(body) || (patterns.reexport?.test(body) ?? false)) {
+		if (patterns.decl.test(body) || patterns.anonDefault.test(body) || (patterns.destructure?.test(body) ?? false) || (patterns.reexport?.test(body) ?? false)) {
 			declLines.push({ idx: i, indent });
 			if (indent < minDeclIndent) minDeclIndent = indent;
 		}
@@ -569,7 +630,7 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 			const endLine = spanFor(lines, i, patterns, 10);
 			symbols.push({
 				name: "default",
-				kind: "function",
+				kind: /\bclass\b/.test(body) ? "class" : "function",
 				line: i + 1,
 				endLine: endLine + 1,
 				depth: 0,
@@ -600,7 +661,31 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 		}
 
 		const m = body.match(patterns.decl);
-		if (!m) continue;
+		if (!m) {
+			// Destructuring declaration: first binding is the name; for multi-line
+			// bindings (`const {` ... next lines) look ahead a few lines.
+			if (patterns.destructure) {
+				const dm = body.match(patterns.destructure);
+				if (dm) {
+					let name = dm[1];
+					if (!name) {
+						for (let k = 1; k <= 4 && i + k < lines.length; k++) {
+							const bm = lines[i + k].match(/^\s*([A-Za-z_$][\w$]*)/);
+							if (bm) { name = bm[1]; break; }
+						}
+					}
+					symbols.push({
+						name: name ?? "destructure",
+						kind: "const",
+						line: i + 1,
+						endLine: spanFor(lines, i, patterns, 10, true) + 1,
+						depth: 0,
+						desc: descFor(lines, i),
+					});
+				}
+			}
+			continue;
+		}
 		const name = patterns.nameOf(m, body);
 		if (!name) continue;
 		const kind = patterns.kindOf(m, body);
@@ -633,9 +718,9 @@ function extractTsLike(lines: string[], patterns: LangPatterns): SkimSymbol[] {
 			const body = line.trim();
 			if (!body) continue;
 			const m = body.match(patterns.method);
-			if (!m || patterns.methodBlacklist.test(m[1])) continue;
+			if (!m) continue;
 			const name = patterns.nameOf(m, body);
-			if (!name) continue;
+			if (!name || patterns.methodBlacklist.test(name)) continue;
 			const endLine = spanFor(lines, i, patterns, 10);
 			symbols.push({
 				name,
@@ -1053,7 +1138,9 @@ export function readSymbol(lines: string[], lang: string, target: string | numbe
 		const patterns = patternsFor(lang);
 		let end = idx;
 		if (patterns && patterns.brace) {
-			const open = findBodyBrace(lines, idx, 10);
+			// Follow a block only when the target line itself opens one; a plain
+			// statement line must not swallow the next symbol's body.
+			const open = findBodyBrace(lines, idx, 1);
 			if (open !== null) {
 				const close = scanBalanced(lines, open.line, "{", "}", open.col);
 				if (close !== -1) end = close;
