@@ -382,6 +382,25 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   }
 }
 
+// ================= Test 14: tilde and absolute glob patterns =================
+console.log("Test 14: ~/ and absolute glob imports resolve their base dirs");
+{
+  const prevHome = process.env.HOME;
+  process.env.HOME = TMP; // ~ expands to $HOME at call time
+  try {
+    writeFileSync(join(TMP, "RULES.md"), "@import ~/docs/patterns/*.md\n");
+    let r = await inject(TMP);
+    assert(r.systemPrompt.includes("- p1") && r.systemPrompt.includes("- p2"), "~/ glob expanded from $HOME");
+
+    writeFileSync(join(TMP, "RULES.md"), `@import ${TMP}/docs/patterns/*.md\n`);
+    r = await inject(TMP);
+    assert(r.systemPrompt.includes("- p1") && r.systemPrompt.includes("- p2"), "absolute glob expanded");
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+}
+
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 else process.env.PI_CODING_AGENT_DIR = prevAgentDir;

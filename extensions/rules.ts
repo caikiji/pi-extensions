@@ -486,10 +486,12 @@ function globMatch(pattern: string, baseDir: string): { files: string[] } {
     const f = resolveImportPath(p, baseDir);
     return { files: existsSync(f) && statSync(f).isFile() ? [f] : [] };
   }
-  const base =
-    abs || (segs[0] === "~" && segs.length > 1)
-      ? join(homedir(), segs.slice(0, wi).join("/"))
-      : resolve(baseDir, segs.slice(0, wi).join("/"));
+  // path.join() does not reset on absolute segments, so strip the leading
+  // "/" or "~" segment before joining (otherwise bases like ~/~/docs appear).
+  let base: string;
+  if (abs) base = "/" + segs.slice(0, wi).join("/");
+  else if (segs[0] === "~") base = join(homedir(), segs.slice(1, wi).join("/"));
+  else base = resolve(baseDir, segs.slice(0, wi).join("/"));
   const files: string[] = [];
   if (existsSync(base) && statSync(base).isDirectory()) {
     walkGlob(base, segs.slice(wi), 0, files);
