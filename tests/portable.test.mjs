@@ -43,8 +43,15 @@ console.log("portable: committed code/config files are free of machine-specific 
       [/(^|[\s"'`(])[A-Za-z]:[\\/]{1,2}[^\s\\"'`()]+/, "drive-letter absolute path"],
     ];
     const found = [];
+    // Read the committed (HEAD) content: the guard exists to keep machine
+    // paths out of commits. Local uncommitted paths (README "Type-checking"
+    // workflow for tsconfig.json) must not fail `npm test`.
+    const readCommitted = (f) => {
+      const r = spawnSync("git", ["cat-file", "blob", `HEAD:${f}`], { cwd: root, encoding: "utf-8" });
+      return r.status === 0 ? r.stdout : readFileSync(join(root, f), "utf-8");
+    };
     for (const f of files) {
-      const text = readFileSync(join(root, f), "utf-8");
+      const text = readCommitted(f);
       for (const [re, label] of markers) {
         const m = text.match(re);
         if (m) found.push(`${f}: ${label} (${m[0].slice(0, 40).replace(/\n/g, "\\n")})`);
