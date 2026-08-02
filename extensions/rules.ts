@@ -74,10 +74,10 @@ const TEMPLATE = `<!-- =========================================================
     @import docs/x.md                     import a whole file (path relative to THIS file's directory)
     @import docs/x.md#section             import one heading section (heading line included)
     @import docs/*.md                     glob import: * = one level, ** = recursive, ? = one char
-    @import-if os:darwin docs/macos.md      conditional import: os:<platform> | env:<VAR> |
-    @import-if env:CI docs/ci.md            env:<VAR>=<value> | has:<path>; prefix ! to negate;
-    @import-if has:scripts/build.sh x.md    env:<VAR> is non-empty, env:<VAR>= exact (empty ok),
-                                            has:<path> exists (relative to this file's directory)
+    @import-if os:darwin docs/macos.md    conditional import: os:<platform> | env:<VAR> |
+    @import-if env:CI docs/ci.md          env:<VAR>=<value> | has:<path>; prefix ! to negate;
+    @import-if has:scripts/build.sh x.md  env:<VAR> is non-empty, env:<VAR>= exact (empty ok),
+                                          has:<path> exists (relative to this file's directory)
     \\@import literal                      escaped: shown literally, not expanded
     @rules max_depth 5                    set limits (affects rest of this file + its imports):
     @rules max_glob_files 50              max_depth / max_glob_files / max_total_bytes (b/kb/mb)
