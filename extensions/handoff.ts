@@ -15,6 +15,8 @@
  *
  * Every successful generation is auto-saved to .pi/handoffs/YYYYMMDD-HHMM.md
  * (front matter holds goal / created / source session / model), silently.
+ * The drafts dir carries an auto-generated .gitignore (same pattern as
+ * .pi/git/.gitignore), so drafts stay untracked by git by default.
  * Cancel the review editor and the draft stays on disk for a later handoff.
  * Drafts are self-contained, so a draft saved in one session can be handed
  * off from any other session later.
@@ -38,6 +40,9 @@
  *      new session via pi.setSessionName() inside withSession (runtime
  *      actions are re-bound to the replacement session before withSession
  *      runs). The goal is the fallback when the model omits the line.
+ *   7. .pi/handoffs/.gitignore is auto-created with "*" + "!.gitignore"
+ *      (same pattern as .pi/git/.gitignore), so generated drafts are
+ *      never tracked by git by default; a user-customized file is kept.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -102,6 +107,22 @@ export function draftsDir(cwd: string): string {
 	return join(cwd, ".pi", "handoffs");
 }
 
+/** Content of the auto-generated .pi/handoffs/.gitignore (same pattern as .pi/git/.gitignore). */
+export const DRAFT_GITIGNORE = "*\n!.gitignore\n";
+
+/**
+ * Ensure the drafts dir exists and carries a .gitignore so drafts are never
+ * tracked by git by default. Writes only when missing, so a user-customized
+ * ignore file is preserved. Returns the drafts dir path.
+ */
+export function ensureDraftDir(cwd: string): string {
+	const dir = draftsDir(cwd);
+	mkdirSync(dir, { recursive: true });
+	const ignore = join(dir, ".gitignore");
+	if (!existsSync(ignore)) writeFileSync(ignore, DRAFT_GITIGNORE, "utf8");
+	return dir;
+}
+
 /** Local-time filename stamp, e.g. 20260115-1430 */
 export function timestampName(date: Date): string {
 	const p = (n: number) => String(n).padStart(2, "0");
@@ -163,8 +184,7 @@ export function readDraft(cwd: string, name: string): HandoffDraft | null {
 }
 
 export function writeDraft(cwd: string, name: string, meta: HandoffDraftMeta, content: string): string {
-	const dir = draftsDir(cwd);
-	mkdirSync(dir, { recursive: true });
+	const dir = ensureDraftDir(cwd);
 	const path = join(dir, name);
 	writeFileSync(path, serializeFrontMatter(meta, content), "utf8");
 	return path;
@@ -768,6 +788,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
+				// Ensure existing dirs (created by older versions) get the ignore file too.
+				ensureDraftDir(ctx.cwd);
 				const action = parseHandoffArgs(args);
 				if (action.kind === "goal") {
 					await handleGoal(ctx, action.goal, pi);

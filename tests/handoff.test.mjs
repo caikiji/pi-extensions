@@ -5,7 +5,8 @@
 // Uses tests/.work for throwaway files.
 // Requires Node >= 22.18 — just run:  node tests/handoff.test.mjs
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -26,6 +27,8 @@ const {
 	formatCreated,
 	draftsDir,
 	showDraftPicker,
+	ensureDraftDir,
+	DRAFT_GITIGNORE,
 } = mod;
 
 let pass = 0, fail = 0;
@@ -137,8 +140,53 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(!existsSync(join(WORK, "20260114-1000.md")), "deleted file is really gone");
 }
 
-// --- arg parsing --------------------------------------------------------------
+// --- draft dir gitignore (drafts must stay untracked by default) -----------
 
+{
+	const dir = join(WORK, "gitignore1");
+	writeDraft(dir, "20260115-1430.md", META, CONTENT);
+	const ignorePath = join(dir, ".pi", "handoffs", ".gitignore");
+	assert(existsSync(ignorePath), "writeDraft creates .pi/handoffs/.gitignore");
+	assert(readFileSync(ignorePath, "utf8") === DRAFT_GITIGNORE, "gitignore has the ignore-all pattern");
+	assert(DRAFT_GITIGNORE === "*\n!.gitignore\n", "pattern matches the .pi/git/.gitignore content");
+}
+
+{
+	// a user-customized ignore file is preserved
+	const dir = join(WORK, "gitignore2");
+	mkdirSync(join(dir, ".pi", "handoffs"), { recursive: true });
+	const custom = "# mine\n*.tmp\n";
+	writeFileSync(join(dir, ".pi", "handoffs", ".gitignore"), custom);
+	writeDraft(dir, "20260115-1430.md", META, CONTENT);
+	assert(readFileSync(join(dir, ".pi", "handoffs", ".gitignore"), "utf8") === custom, "user-customized .gitignore is kept");
+}
+
+{
+	// ensureDraftDir is idempotent: creates dir + gitignore, never clobbers
+	const dir = join(WORK, "gitignore3");
+	const first = ensureDraftDir(dir);
+	assert(first === draftsDir(dir), "ensureDraftDir returns the drafts dir");
+	assert(existsSync(join(first, ".gitignore")), "ensureDraftDir writes the .gitignore");
+	ensureDraftDir(dir);
+	assert(readFileSync(join(first, ".gitignore"), "utf8") === DRAFT_GITIGNORE, "second ensure call keeps the content");
+}
+
+{
+	// real git: drafts are ignored; only the .gitignore itself is visible
+	const repo = join(WORK, "gitrepo");
+	mkdirSync(repo, { recursive: true });
+	const git = (args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+	git(["init", "-q"]);
+	git(["config", "user.email", "t@t"]);
+	git(["config", "user.name", "t"]);
+	writeDraft(repo, "20260115-1430.md", META, CONTENT);
+	const status = git(["status", "--porcelain", "--untracked-files=all"]).trim();
+	assert(status === "?? .pi/handoffs/.gitignore", "only the .gitignore is untracked, drafts are ignored");
+	const ignored = git(["check-ignore", ".pi/handoffs/20260115-1430.md"]).trim();
+	assert(ignored === ".pi/handoffs/20260115-1430.md", "git check-ignore confirms the draft is ignored");
+}
+
+// --- arg parsing ---
 {
 	const a = parseHandoffArgs("");
 	assert(a.kind === "goal" && a.goal === "", '"" -> goal flow');
