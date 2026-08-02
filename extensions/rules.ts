@@ -58,100 +58,70 @@ function defaultConfig(): RulesConfig {
 }
 const TEMPLATE = `<!-- ============================================================
   RULES.md — user-maintained ground truth for AI agents
-  RULES.md —— 用户维护的恒真规则文件
 
   This file is authoritative and stable: it changes ONLY when you
   edit it. Agents must follow it; if a rule conflicts with the
   code they observe, they should ask you to clarify — never modify
   this file themselves.
-  本文件权威且稳定：只在你主动修改时变更。Agent 必须遵守；
-  若规则与代码现实冲突，应向用户求证，而不是自行修改本文件。
 
-  Syntax / 语法（示例都在注释内，加载时剥离，不进提示词）：
+  Syntax (examples live inside comments; stripped at load, never
+  reach the prompt):
     &lt;!-- comment --&gt;                HTML comment; stripped at load
-                                          注释；加载时剥离，不进提示词
     @import docs/x.md                     import a whole file (path relative to THIS file's directory)
-                                          导入整文件（路径相对本文件所在目录）
     @import docs/x.md#section             import one heading section (heading line included)
-                                          只导入该标题的 section（含标题行）
     @import docs/*.md                     glob import: * = one level, ** = recursive, ? = one char
-                                          glob 导入：* 单层、** 递归、? 单字符
     @import-if os:darwin docs/macos.md    conditional import: os:<platform> | env:<VAR> |
     @import-if env:CI docs/ci.md          env:<VAR>=<value>; prefix ! to negate; skip is silent
-    @import-if !env:CI docs/local.md      条件导入：os: 平台 / env: 变量 / env: 变量=值；! 取反；不满足静默跳过
     \\@import literal                      escaped: shown literally, not expanded
-                                          转义，原样显示、不展开
     @rules max_depth 5                    set limits (affects rest of this file + its imports):
-                                          设置参数（影响本文件其余部分及其导入）
     @rules max_glob_files 50              max_depth / max_glob_files / max_total_bytes (b/kb/mb)
     @rules max_total_bytes 50kb           defaults: depth 5 · glob 50 files · 50 KB
                                           hard limits: glob stops at max_glob_files, content truncates with a marker
-                                          硬限制：glob 展开到上限即停，内容超限截断并加标记
     Imported files may import further (cycles detected, files deduped)
-    被导入文件可继续导入（自动防环、按路径去重）
 ============================================================ -->
 
 <!-- ===== Decisions & rationale (why, not how) ===== -->
-<!-- ===== 决策与理由（为什么这么做，而不是怎么做） ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 - Package manager is pnpm: workspace support is more reliable than npm
-- 包管理用 pnpm：workspace 支持比 npm 更稳
 -->
 
 <!-- ===== Constraints & traps (not visible in the code) ===== -->
-<!-- ===== 约束与陷阱（代码里看不出来的红线） ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 - dist/ is generated output; never edit it by hand
-- dist/ 是构建产物，永远不要手改
 -->
 
 <!-- ===== Intent (layout changes, intent does not) ===== -->
-<!-- ===== 意图（布局会变，意图不会） ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 - This repo's end goal is to be split into independent npm packages
-- 本仓库的最终目标是拆成独立 npm 包
 -->
 
 <!-- ===== Commit style ===== -->
-<!-- ===== 提交规范 ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 - Commit messages are always English (summary and body)
-- 提交信息一律英文（summary 和 body 都是）
 - Format: \`type(scope): summary\`, e.g. \`feat(rules): add @rules directive\`
-- 格式：\`type(scope): summary\`，如 \`feat(rules): add @rules directive\`
 - type: feat / fix / refactor / docs / test / chore / style only
-- type 只用：feat / fix / refactor / docs / test / chore / style
 - summary is imperative (Add / Fix / Update / Remove...), at most 72 chars
-- summary 用祈使句（Add / Fix / Update / Remove...），不超过 72 字符
 - One commit does one thing; both \`npm test\` and \`npm run lint\` must pass first
-- 一个提交只做一件事；\`npm test\` 和 \`npm run lint\` 都通过后才提交
 - Never commit runtime artifacts like tests/.work or node_modules
-- 不提交 tests/.work、node_modules 等运行时产物
 -->
 
 <!-- ===== Versioning ===== -->
-<!-- ===== 版本号规则 ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 - Check package.json version before committing; bump in the same commit as the change
-- 提交前检查 package.json 的 version，需要 bump 时与改动同一提交推送
 - feat -> minor bump (0.0.2 -> 0.1.0)
-- feat → minor 递增（0.0.2 → 0.1.0）
 - fix / refactor / style / test -> patch bump (0.0.2 -> 0.0.3)
-- fix / refactor / style / test → patch 递增（0.0.2 → 0.0.3）
 - docs / chore -> no bump (docs-only or housekeeping)
-- docs / chore → 不改版本号（仅文档或杂务时无需 bump）
 - Versions only go up; releases are tagged (e.g. v0.0.2)
-- 版本号只增不减；发布用 git tag 标记（如 v0.0.2）
 -->
 
-<!-- ===== 导入（指向你选定维护的文档的稳定指针） ===== -->
+<!-- ===== Imports (stable pointers to docs you maintain) ===== -->
 
-<!-- Example / 示例：
+<!-- Example:
 @import docs/conventions.md
 @import docs/architecture.md#data-flow
 @import docs/patterns/*.md
