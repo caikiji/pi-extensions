@@ -1,11 +1,10 @@
 {
   // Type-checking config for extensions/*.ts (editor + `tsc --noEmit`).
-  // At runtime, @earendil-works/* and typebox are resolved by pi's own loader
   // (jiti aliases / virtual modules), never via node_modules or these paths,
-  // so nothing here may reference a machine-specific pi install. To get full
-  // IDE typing for those imports on your machine, add a local `paths` block
-  // pointing at your pi package dir (keep it uncommitted) -- see README
-  // "Type-checking".
+  // so nothing here may reference a machine-specific pi install. For editor
+  // typing, run `npm install` once: package.json declares the @earendil-works/*
+  // and typebox deps, and NodeNext resolution finds them in node_modules
+  // (gitignored) with no paths needed -- see README "Type-checking".
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",

@@ -85,11 +85,11 @@
 - agent 可见文本（skim/checkpoint 等工具与 / 命令的返回、错误、notify）必须纯 ASCII：无中文，也不用 ├─ · … — 等非 ASCII 装饰符号（树形用 |-，分隔用 | 或 -）
 
 - .pi/settings.json 是本仓库的自引用配置（打开项目自动加载 extensions/ 全部扩展），勿删；新增扩展放进 extensions/ 目录即自动生效，同时注册到 package.json 的 pi.extensions
-- 提交的代码与配置文件不得含机器特定的绝对路径（用户目录、nvm、npm 全局安装目录、盘符等）；本机所需的机器相关配置（如 tsconfig 的 `paths`）只作为未提交的本地改动保留——由 `tests/portable.test.mjs` 机械检查
+- 提交的代码与配置文件不得含机器特定的绝对路径（用户目录、nvm、npm 全局安装目录、盘符等）；类型检查所需依赖在 package.json 的 devDependencies / peerDependencies 声明，`npm install` 即可（node_modules 不提交），无需任何机器相关配置——由 `tests/portable.test.mjs` 机械检查
 
 ## 意图 (layout changes, intent does not)
 
-- 保持"clone 即跑"：无构建步骤、无 npm install、任何机器可测
+- 保持"clone 即跑"：无构建步骤、任何机器可测（`npm test` 不需要 node_modules；npm install 仅用于本地 IDE 类型提示）
 - 每个扩展解决一个具体痛点，不过度设计
 - 本仓库是个人工具，但代码质量按开源标准
 

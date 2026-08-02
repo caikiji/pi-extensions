@@ -47,17 +47,12 @@ node tests/run-all.mjs rules
 
 ## 开发：类型检查
 
-`npm test` 用 Node 原生类型剥离直接跑，不依赖 tsconfig。扩展里的 `@earendil-works/*` / `typebox` 导入在运行时由 pi 自身的加载器解析（jiti alias / virtual modules），不走 node_modules，所以 tsconfig 的 `paths` 只影响编辑器/tsc 的静态检查，且必须指向本机 pi 安装目录——机器相关的 `paths` 不提交，保证任何机器 clone 即跑。
+`npm test` 用 Node 原生类型剥离直接跑，不需要 node_modules；tsconfig 只服务于编辑器/tsc 的静态检查。扩展里的 `@earendil-works/*` / `typebox` 在运行时由 pi 自身的加载器解析（jiti alias / virtual modules），不走 node_modules；类型层面由 package.json 的 peerDependencies / devDependencies 声明（npm 7+ 自动安装 peer）。
 
-需要完整 IDE 类型提示时，在本机 `tsconfig.json` 的 `compilerOptions.paths` 里补上指向你 pi 安装目录的映射（改动不提交即可）：
+需要完整 IDE 类型提示或 `tsc --noEmit` 时，装一次依赖即可（node_modules 已 gitignore，不提交）：
 
-```jsonc
-// 例：macOS nvm / Windows npm 全局安装的实际路径不同
-"paths": {
-  "@earendil-works/pi-coding-agent": ["/path/to/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-  "@earendil-works/pi-agent-core": ["/path/to/pi/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
-  "@earendil-works/pi-ai": ["/path/to/pi/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
-  "@earendil-works/pi-ai/compat": ["/path/to/pi/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
-  "@earendil-works/pi-tui": ["/path/to/pi/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
-}
+```bash
+npm install
 ```
+
+之后 `moduleResolution: NodeNext` 走标准 node_modules 查找，`@earendil-works/*` 和 `typebox` 全部可解析，无需任何机器相关的 `paths` 配置。
