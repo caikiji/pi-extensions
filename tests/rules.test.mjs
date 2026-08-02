@@ -369,7 +369,9 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   try {
     await import("@earendil-works/pi-tui");
     piTuiResolvable = true;
-  } catch {}
+  } catch {
+    // pi-tui not installed (fresh clone): the degrade branch below covers it
+  }
   let customRan = false;
   await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, custom: () => { customRan = true; } }, reload: async () => {} });
   if (piTuiResolvable) {
