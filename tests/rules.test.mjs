@@ -1,12 +1,11 @@
 // Regression test for extensions/rules.ts (39 assertions).
 // Loads the real extension with a fake pi API — no network, no pi session, no npm deps.
-// Works on any machine: paths are resolved relative to this file.
+// Works on any machine: sandbox lives under os.tmpdir(), outside any RULES.md ancestry.
 // Requires Node >= 22.18 (native TypeScript type stripping) — just run:  node tests/rules.test.mjs
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 const mod = await import(new URL("../extensions/rules.ts", import.meta.url));
 
@@ -29,7 +28,7 @@ function assert(cond, msg) {
   else { fail++; console.log(`  ✗ FAIL: ${msg}`); }
 }
 
-const TMP = join(fileURLToPath(new URL(".", import.meta.url)), ".work");
+const TMP = join(tmpdir(), "pi-ext-rules-test");
 // rules.ts displays paths under $HOME as ~/... — mirror that for source-slice offsets
 const disp = (p) => p.startsWith(homedir()) ? "~" + p.slice(homedir().length) : p;
 rmSync(TMP, { recursive: true, force: true });
@@ -485,16 +484,30 @@ console.log("Test 18: @import-if conditional imports");
   process.env.RULES_IF_TEST = "1";
   process.env.RULES_IF_EMPTY = "";
   delete process.env.RULES_IF_GONE;
+  process.env.RULES_IF_EQ = "a=b";
+  mkdirSync(join(TMP, "docs/globs"), { recursive: true });
   writeFileSync(join(TMP, "docs/oscheck.md"), "- os matched\n");
+  writeFileSync(join(TMP, "docs/negos.md"), "- negos matched\n");
+  writeFileSync(join(TMP, "docs/negos2.md"), "- negos2 matched\n");
+  writeFileSync(join(TMP, "docs/eq.md"), "- eq matched\n");
+  writeFileSync(join(TMP, "docs/globs/a.md"), "- ga\n");
+  writeFileSync(join(TMP, "docs/globs/b.md"), "- gb\n");
+  writeFileSync(join(TMP, "docs/condsub.md"), "# CondSub\n\n@import-if env:RULES_IF_GONE patterns/two.md\n- sub stuff\n");
   writeFileSync(join(TMP, "RULES.md"), [
     "@import-if env:RULES_IF_TEST docs/conventions.md",
     "@import-if env:RULES_IF_GONE docs/architecture.md#Data Flow",
     "@import-if !env:RULES_IF_GONE docs/patterns/*.md",
     "@import-if env:RULES_IF_TEST=1 docs/nested/helper.md",
+    "@import-if env:RULES_IF_TEST docs/condsub.md",
     "@import-if env:RULES_IF_EMPTY docs/missing-a.md",
     "@import-if bogus docs/missing-b.md",
     "@import-if os:definitely-not-a-platform docs/oscheck.md",
     `@import-if os:${process.platform} docs/oscheck.md`,
+    "@import-if !os:definitely-not-a-platform docs/negos.md",
+    "@import-if env:RULES_IF_EQ=a=b docs/eq.md",
+    "@import-if env:RULES_IF_TEST docs/missing-c.md",
+    "@rules max_glob_files 1",
+    "@import-if env:RULES_IF_TEST docs/globs/*.md",
     "\\@import-if env:RULES_IF_GONE docs/literal.md",
   ].join("\n"));
   const g = (await inject(TMP)).systemPrompt;
@@ -502,34 +515,65 @@ console.log("Test 18: @import-if conditional imports");
   assert(!g.includes("flow A → B"), "env unset -> import skipped silently");
   assert(g.includes("- p1") && g.includes("- p2"), "negated condition imports when env unset");
   assert(g.includes("helper stuff"), "env:VAR=value exact match imports");
+  assert(g.includes("- sub stuff"), "nested @import-if inside an imported file works");
+  assert(g.includes("- negos matched"), "!os: (impossible platform) imports");
+  assert(!g.includes("negos2"), "!os: (current platform) skipped");
+  assert(g.includes("- eq matched"), "env:VAR=value with = in the value imports");
   assert(!g.includes("missing-a"), "empty env treated as unset");
   assert(!g.includes("missing-b"), "invalid condition -> skipped");
-  assert(!g.includes("[rules] skipped:"), "skips produce no prompt text");
+  assert(g.includes("[rules] skipped: docs/missing-c.md (file not found)"), "matched import with missing file reports like @import");
+  assert(g.includes("glob limit 1 exceeded"), "@rules max_glob_files applies to @import-if globs");
+  assert(g.includes("- ga") && !g.includes("- gb"), "capped @import-if glob imports only the first file");
   assert(g.includes("@import-if env:RULES_IF_GONE docs/literal.md"), "escaped @import-if kept as literal");
   assert(g.includes("os matched"), "current-platform os: condition imports");
-  assert(g.split("os matched").length - 1 === 1, "matching os: import deduped (skipped line contributes nothing)");
-
+  assert(g.split("- os matched").length - 1 === 1, "matching os: import deduped (skipped line contributes nothing)");
   // env change invalidates the cache (condition results are part of the cache key)
   process.env.RULES_IF_GONE = "1";
   const g2 = (await inject(TMP)).systemPrompt;
   assert(g2.includes("flow A → B"), "newly matching condition picked up without reload");
-  assert(!g2.includes("- p1"), "newly failing condition dropped without reload");
+  assert(!g2.includes("- p3"), "newly failing condition dropped without reload");
+  assert(g2.includes("- p2"), "nested @import-if flips when the env changes");
 
-  // report lists skips and the invalid-condition diagnostic
+  // report lists skips, the invalid-condition diagnostic, and the import-if directive
   let n;
   await commands.rules.handler("show", { cwd: TMP, hasUI: false, mode: "rpc", ui: { notify: (m, t) => { n = [t, m]; } }, reload: async () => {} });
   assert(n[1].includes("[skip]"), "skipped imports listed in the report");
   assert(n[1].includes("invalid condition"), "invalid condition surfaces as a diagnostic");
+  assert(n[1].includes("@import-if env:RULES_IF_TEST"), "diagnostics carry the full @import-if directive");
+
+  // value comparison change invalidates the cache too
+  process.env.RULES_IF_EQ = "a=c";
+  const g3 = (await inject(TMP)).systemPrompt;
+  assert(!g3.includes("- eq matched"), "env:VAR=value change picked up without reload");
+  assert(g3.includes("- sub stuff"), "unrelated conditions unaffected");
 
   delete process.env.RULES_IF_TEST;
   delete process.env.RULES_IF_EMPTY;
+  delete process.env.RULES_IF_EQ;
   delete process.env.RULES_IF_GONE;
 }
-
+console.log("Test 19: ancestor RULES.md lookup");
+{
+  const deep = join(TMP, "sub/deep");
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(TMP, "RULES.md"), "- root rule\n");
+  const r1 = await inject(deep);
+  assert(r1.systemPrompt.includes("- root rule"), "RULES.md found in an ancestor dir");
+  writeFileSync(join(deep, "RULES.md"), "- deep rule\n");
+  const r2 = await inject(deep);
+  assert(r2.systemPrompt.includes("- root rule") && r2.systemPrompt.includes("- deep rule"), "all ancestor RULES.md files apply");
+  writeFileSync(join(TMP, "sub/RULES.md"), "- sub rule\n");
+  const r3 = await inject(deep);
+  assert(r3.systemPrompt.includes("- sub rule"), "RULES.md created in a new ancestor picked up without reload");
+  rmSync(join(TMP, "RULES.md"), { force: true });
+  rmSync(join(deep, "RULES.md"), { force: true });
+  rmSync(join(TMP, "sub/RULES.md"), { force: true });
+}
 
 // restore env
 if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
 
+rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

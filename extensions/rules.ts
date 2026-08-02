@@ -12,14 +12,18 @@
  *   /rules init     Create a RULES.md template in the current directory
  *                   (--force overwrites an existing file, -g writes to the global agent dir)
  *   /rules reload   Re-read RULES.md files and rebuild the system prompt
- * RULES.md syntax (loaded from ~/.pi/agent/RULES.md and <cwd>/RULES.md):
+ * RULES.md is loaded from the global agent dir plus every directory from
+ * <cwd> up to the home directory (nearest first, all apply).
+ * RULES.md syntax:
  *   <!-- comment -->                     comment; stripped at load, never reaches the prompt
  *   @import docs/x.md                    import a whole file (relative to THIS file's directory)
  *   @import docs/x.md#section            import one heading section (heading line included)
  *   @import docs/*.md                    glob import: * one level, ** recursive, ? one char
  *   @import-if os:darwin docs/macos.md   conditional import: os:<platform> | env:<VAR> |
- *   @import-if env:CI docs/ci.md         env:<VAR>=<value>; prefix ! to negate; a skipped
- *                                        import is silent in the prompt, [skip] in show/report
+ *   @import-if env:CI docs/ci.md         env:<VAR>=<value> | has:<path>; prefix ! to negate;
+ *                                        env:<VAR> is non-empty, env:<VAR>= matches empty value,
+ *                                        has:<path> exists (relative to THIS file's directory);
+ *                                        a skipped import is silent, [skip] in show/report
  *   @rules max_depth 5                   set limits: max_depth / max_glob_files / max_total_bytes
  *   Imported files may import further (cycles detected, files deduped, limits via @rules).
  *
@@ -70,14 +74,18 @@ const TEMPLATE = `<!-- =========================================================
     @import docs/x.md                     import a whole file (path relative to THIS file's directory)
     @import docs/x.md#section             import one heading section (heading line included)
     @import docs/*.md                     glob import: * = one level, ** = recursive, ? = one char
-    @import-if os:darwin docs/macos.md    conditional import: os:<platform> | env:<VAR> |
-    @import-if env:CI docs/ci.md          env:<VAR>=<value>; prefix ! to negate; skip is silent
+    @import-if os:darwin docs/macos.md      conditional import: os:<platform> | env:<VAR> |
+    @import-if env:CI docs/ci.md            env:<VAR>=<value> | has:<path>; prefix ! to negate;
+    @import-if has:scripts/build.sh x.md    env:<VAR> is non-empty, env:<VAR>= exact (empty ok),
+                                            has:<path> exists (relative to this file's directory)
     \\@import literal                      escaped: shown literally, not expanded
     @rules max_depth 5                    set limits (affects rest of this file + its imports):
     @rules max_glob_files 50              max_depth / max_glob_files / max_total_bytes (b/kb/mb)
     @rules max_total_bytes 50kb           defaults: depth 5 · glob 50 files · 50 KB
                                           hard limits: glob stops at max_glob_files, content truncates with a marker
     Imported files may import further (cycles detected, files deduped)
+    RULES.md is loaded from the global agent dir plus every directory
+    from the working dir up to the home directory (nearest first, all apply).
 ============================================================ -->
 
 <!-- ===== Decisions & rationale (why, not how) ===== -->
@@ -166,7 +174,7 @@ interface Expansion {
   generated: string;
   limits: RulesConfig;
   settings: AppliedSetting[];
-  conditions: Map<string, boolean>; // evaluated @import-if results: cond -> matched (part of the cache key)
+  conditions: ConditionState[]; // evaluated @import-if results (cache key part)
   fileStats: Map<string, string | null>; // canonical path -> stat key (null = missing) of every referenced file or glob dir
 }
 
@@ -491,20 +499,30 @@ function globMatch(pattern: string, baseDir: string): { files: string[]; dirs: s
 // Conditional imports (@import-if)
 // ============================================================================
 
+interface ConditionState {
+  cond: string; // raw condition text, e.g. "env:CI" or "has:docs/x.md"
+  baseDir: string; // directory the condition was evaluated against (has: resolves relative to it)
+  matched: boolean;
+}
+
 interface CondResult {
   valid: boolean; // condition syntax understood
   matched: boolean; // condition evaluates to true
   detail: string; // short human-readable explanation (pure ASCII)
+  path?: string; // resolved path for has: conditions (recorded in fileStats so existence changes invalidate the cache)
 }
 
 /**
- * Evaluate an @import-if condition: [!]os:<platform> | [!]env:<VAR> | [!]env:<VAR>=<value>.
- * os: matches process.platform(); env:<VAR> matches when the variable is defined and
- * non-empty; env:<VAR>=<value> matches on exact value equality. A leading ! negates.
- * Conditions are deterministic per process, and their results are part of the
- * expansion cache key, so an env change is picked up without /rules reload.
+ * Evaluate an @import-if condition:
+ *   [!]os:<platform>         process.platform equals the value (case-insensitive)
+ *   [!]env:<VAR>             variable is defined and non-empty (empty counts as unset)
+ *   [!]env:<VAR>=<value>     variable equals the value exactly (empty value allowed)
+ *   [!]has:<path>            path exists (relative to baseDir, or ~/ or absolute)
+ * A leading ! negates the result. Conditions are deterministic per process and
+ * their results are part of the expansion cache key, so an env change or a
+ * has: path appearing/disappearing is picked up without /rules reload.
  */
-function evalImportIfCond(cond: string): CondResult {
+function evalImportIfCond(cond: string, baseDir?: string): CondResult {
   let raw = cond.trim();
   let negated = false;
   if (raw.startsWith("!")) {
@@ -513,6 +531,7 @@ function evalImportIfCond(cond: string): CondResult {
   }
   let matched = false;
   let detail = "";
+  let path: string | undefined;
   if (raw.startsWith("os:")) {
     const want = raw.slice(3).toLowerCase();
     matched = process.platform === want;
@@ -531,12 +550,22 @@ function evalImportIfCond(cond: string): CondResult {
       matched = actual === value;
       detail = matched ? `${name}=${value}` : `${name}=${actual === undefined ? "(unset)" : JSON.stringify(actual)}, wanted ${value}`;
     }
+  } else if (raw.startsWith("has:")) {
+    const p = raw.slice(4).trim();
+    if (p.length === 0 || baseDir === undefined) {
+      return { valid: false, matched: false, detail: `invalid condition "${cond}"` };
+    }
+    path = resolveImportPath(p, baseDir);
+    matched = existsSync(path);
+    detail = matched ? `${p} exists` : `${p} does not exist`;
   } else {
     return { valid: false, matched: false, detail: `invalid condition "${cond}"` };
   }
+  const res: CondResult = { valid: true, matched, detail };
+  if (path !== undefined) res.path = path;
   return negated
-    ? { valid: true, matched: !matched, detail: `negated: ${detail}` }
-    : { valid: true, matched, detail };
+    ? { ...res, matched: !matched, detail: `negated: ${detail}` }
+    : res;
 }
 
 /**
@@ -555,14 +584,15 @@ function expandImportIf(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
-  conditions: Map<string, boolean>,
+  conditions: ConditionState[],
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
   nodeId: string,
 ): RuleTreeNode | undefined {
-  const { valid, matched, detail } = evalImportIfCond(cond);
-  conditions.set(cond, matched);
+  const { valid, matched, detail, path } = evalImportIfCond(cond, baseDir);
+  conditions.push({ cond, baseDir, matched });
+  if (path !== undefined) fileStats.set(resolve(path), statKey(path)); // has: existence is part of the cache key
   if (matched) {
     return expandImport(
       spec, sourceFile, baseDir, depth, stack, imported, fileStats, config, settings,
@@ -617,7 +647,7 @@ function processDirectives(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
-  conditions: Map<string, boolean>, // @import-if results: cond -> matched (cache key part)
+  conditions: ConditionState[], // evaluated @import-if results (cache key part)
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
@@ -688,7 +718,7 @@ function expandImport(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
-  conditions: Map<string, boolean>,
+  conditions: ConditionState[],
   out: string[],
   imports: ImportInfo[],
   diagnostics: Diagnostic[],
@@ -706,7 +736,7 @@ function expandImport(
     for (const f of files) fileStats.set(resolve(f), statKey(f));
     for (const d of dirs) fileStats.set(resolve(d), statKey(d)); // new files under the glob invalidate the cache
     if (files.length === 0) {
-      diagnostics.push({ level: "warning", message: `${sourceFile}: @import ${spec} - glob matched no files` });
+      diagnostics.push({ level: "warning", message: `${sourceFile}: ${dirLabel} ${spec} - glob matched no files` });
       imports.push({ spec: impSpec, status: "warning", detail: "glob matched no files", bytes: 0 });
       out.push(`[rules] skipped: ${spec} (glob matched no files)`);
       return { id: nodeId, kind: "import", label: `${dirLabel} ${spec}`, status: "warning", meta: "glob matched no files" };
@@ -715,7 +745,7 @@ function expandImport(
     if (capped) {
       diagnostics.push({
         level: "warning",
-        message: `${sourceFile}: @import ${spec} - ${files.length} matches, expanding first ${config.maxGlobFiles}`
+        message: `${sourceFile}: ${dirLabel} ${spec} - ${files.length} matches, expanding first ${config.maxGlobFiles}`
       });
     }
     let total = 0;
@@ -724,7 +754,7 @@ function expandImport(
     const expanded = capped ? files.slice(0, config.maxGlobFiles) : files;
     for (let fi = 0; fi < expanded.length; fi++) {
       const f = expanded[fi];
-      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, `${nodeId}/f:${fi}`);
+      const r = expandFile(f, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, `${nodeId}/f:${fi}`, dirLabel);
       if (r.ok) {
         out.push(r.text);
         total += r.bytes;
@@ -757,7 +787,7 @@ function expandImport(
 
   const p = resolveImportPath(pathPart, baseDir);
   fileStats.set(resolve(p), statKey(p));
-  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, nodeId);
+  const r = expandFile(p, anchor, depth + 1, stack, imported, fileStats, config, settings, conditions, diagnostics, sourceFile, nodeId, dirLabel);
   if (r.ok) {
     out.push(r.text);
     imports.push({ spec: impSpec, status: "ok", detail: anchor ? "section" : "whole file", bytes: r.bytes });
@@ -783,26 +813,27 @@ function expandFile(
   fileStats: Map<string, string | null>,
   config: RulesConfig,
   settings: AppliedSetting[],
-  conditions: Map<string, boolean>,
+  conditions: ConditionState[],
   diagnostics: Diagnostic[],
   sourceFile: string,
   nodeId: string, // id prefix for this file's subtree
+  dirLabel: string = "@import", // directive shown in diagnostics, e.g. "@import-if os:darwin"
 ): { ok: true; text: string; bytes: number; children: RuleTreeNode[] } | { ok: false; reason: string } {
   const canonical = resolve(p);
   fileStats.set(canonical, statKey(canonical));
   // settings inside an imported file affect only its own subtree
   const fileConfig = { ...config };
   if (depth > fileConfig.maxDepth) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - max depth ${fileConfig.maxDepth} exceeded` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: ${dirLabel} ${specLabel(p, anchor)} - max depth ${fileConfig.maxDepth} exceeded` });
     return { ok: false, reason: `max depth ${fileConfig.maxDepth} exceeded` };
   }
   if (stack.has(canonical)) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - circular import` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: ${dirLabel} ${specLabel(p, anchor)} - circular import` });
     return { ok: false, reason: "circular import" };
   }
   if (anchor === undefined && imported.has(canonical)) return { ok: false, reason: "already imported (deduped)" };
   if (!existsSync(canonical)) {
-    diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - file not found` });
+    diagnostics.push({ level: "error", message: `${sourceFile}: ${dirLabel} ${specLabel(p, anchor)} - file not found` });
     return { ok: false, reason: "file not found" };
   }
 
@@ -811,14 +842,14 @@ function expandFile(
   for (const w of warnings) {
     diagnostics.push({
       level: "warning",
-      message: `${sourceFile}: @import ${specLabel(p, anchor)} - line ${w.line}: ${w.message}`,
+      message: `${sourceFile}: ${dirLabel} ${specLabel(p, anchor)} - line ${w.line}: ${w.message}`,
     });
   }
 
   if (anchor !== undefined) {
     const { found, slice } = extractSection(noComments, anchor);
     if (!found) {
-      diagnostics.push({ level: "error", message: `${sourceFile}: @import ${specLabel(p, anchor)} - section not found` });
+      diagnostics.push({ level: "error", message: `${sourceFile}: ${dirLabel} ${specLabel(p, anchor)} - section not found` });
       return { ok: false, reason: `section "#${anchor}" not found` };
     }
     // Sections process directives like whole files: nested @import expands
@@ -903,11 +934,21 @@ function computeExpansion(cwd: string): Expansion {
   let totalBytes = 0;
   const config = defaultConfig();
   const settings: AppliedSetting[] = [];
-  const conditions = new Map<string, boolean>();
+  const conditions: ConditionState[] = [];
   const candidates: { path: string; kind: "global" | "project" }[] = [
     { path: join(getAgentDir(), "RULES.md"), kind: "global" },
-    { path: join(cwd, "RULES.md"), kind: "project" },
   ];
+  // project chain: cwd and every ancestor up to (excluding) the home directory,
+  // nearest first, all apply; every level is recorded even when missing so a
+  // RULES.md created later in any ancestor invalidates the cache
+  let dir = resolve(cwd);
+  for (;;) {
+    candidates.push({ path: join(dir, "RULES.md"), kind: "project" });
+    if (dir === homedir()) break;
+    const parent = dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
 
   for (const c of candidates) {
     // record the candidate regardless of existence so a newly created
@@ -985,8 +1026,8 @@ function cacheFresh(exp: Expansion): boolean {
   for (const [p, k] of exp.fileStats) {
     if (statKey(p) !== k) return false;
   }
-  for (const [cond, matched] of exp.conditions) {
-    if (evalImportIfCond(cond).matched !== matched) return false;
+  for (const c of exp.conditions) {
+    if (evalImportIfCond(c.cond, c.baseDir).matched !== c.matched) return false;
   }
   return true;
 }
