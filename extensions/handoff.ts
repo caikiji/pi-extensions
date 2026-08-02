@@ -28,7 +28,8 @@
  *   4. Drafts: auto-save every generation; /handoff list shows a filterable
  *      picker (type to filter, Left goes back one level, delete confirm
  *      defaults to Cancel). No pi-tui dependency - dialogs render as plain
- *      strings, so they work in any runtime.
+ *      strings and keys go through the keybindings manager from custom()
+ *      (legacy, kitty CSI-u, and user-customized bindings).
  *   5. No-args /handoff opens a goal editor instead of a usage error.
  *   6. Session naming: the same generation call also produces a one-line
  *      "Title:" as its final line (strictly constrained: one line, plain
@@ -192,8 +193,6 @@ export function listDrafts(cwd: string): HandoffDraft[] {
 // ============================================================================
 // Command arg parsing (pure - testable)
 // ============================================================================
-// Command arg parsing (pure - testable)
-// ============================================================================
 
 export type HandoffAction = { kind: "goal"; goal: string } | { kind: "list" };
 
@@ -220,13 +219,20 @@ export function formatCreated(iso: string): string {
 /** Normalize whitespace and truncate to max chars for single-line display. */
 export function goalLine(goal: string, max = 60): string {
 	const one = goal.replace(/\s+/g, " ").trim();
-	return one.length > max ? one.slice(0, max) : one;
+	return cutText(one, max);
 }
 
 /** One-line title: collapse whitespace and truncate to 60 chars. */
 export function sanitizeTitle(raw: string): string {
 	const one = raw.replace(/\s+/g, " ").trim();
-	return one.length > 60 ? one.slice(0, 60) : one;
+	return cutText(one, 60);
+}
+
+/** Truncate to max code units without splitting a surrogate pair. */
+function cutText(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const cut = text.charCodeAt(max - 1) >= 0xd800 && text.charCodeAt(max - 1) <= 0xdbff ? max - 1 : max;
+	return text.slice(0, cut);
 }
 
 /**
@@ -491,21 +497,16 @@ function isPrintable(data: string): boolean {
 	return c >= 0x20 && c !== 0x7f;
 }
 
-/** Arrow-key detection without pi-tui: legacy + kitty CSI escape sequences. */
-function isArrow(data: string, dir: "up" | "down" | "left" | "right"): boolean {
-	const letter = { up: "A", down: "B", right: "C", left: "D" }[dir];
-	return new RegExp(String.raw`^\x1b\[[0-9;]*${letter}$`).test(data);
-}
-
 /**
  * Draft picker: filterable list with a metadata pane. Enter opens the
  * Load / Edit / Delete menu; the left arrow goes back one level (menu ->
  * list, delete-confirm -> menu); Esc cancels everything. Delete confirms
  * inline with Cancel as the default focus. Pure string rendering - no
- * pi-tui dependency, so it runs in any runtime.
+ * pi-tui dependency, so it runs in any runtime. Keys go through the
+ * keybindings manager passed by custom().
  */
 export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: HandoffDraft[]): Promise<string | null> {
-	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+	return ctx.ui.custom<string | null>((tui, theme, kb, done) => {
 		type Mode = "browse" | "menu" | "confirmDelete";
 		let mode: Mode = "browse";
 		let index = 0;
@@ -524,20 +525,24 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 
 		/**
 		 * Fit a line to the terminal: truncate by visible width (wide chars count
-		 * as 2), pad to exactly `width`, and only then apply the color so ANSI
-		 * escapes are never cut mid-sequence. Guarantees visibleWidth <= width,
-		 * which the TUI enforces for every rendered line.
+		 * as 2, surrogate pairs count as 2 and are never split), pad to exactly
+		 * `width`, and only then apply the color so ANSI escapes are never cut
+		 * mid-sequence. Guarantees visibleWidth <= width, which the TUI enforces
+		 * for every rendered line.
 		 */
 		function fit(text: string, width: number, color?: (s: string) => string): string {
 			let visible = 0;
 			let cut = text.length;
-			for (let i = 0; i < text.length; i++) {
-				const w = text.codePointAt(i)! > 0x2e7f ? 2 : 1;
+			let i = 0;
+			while (i < text.length) {
+				const cp = text.codePointAt(i)!;
+				const w = cp > 0x2e7f ? 2 : 1;
 				if (visible + w > width) {
 					cut = i;
 					break;
 				}
 				visible += w;
+				i += cp > 0xffff ? 2 : 1; // skip the low surrogate of a pair
 			}
 			const t = cut < text.length ? text.slice(0, cut) : text;
 			const padded = visible < width ? t + " ".repeat(width - visible) : t;
@@ -601,9 +606,12 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 		}
 
 		function handleInput(data: string) {
+			// All keys are matched through the keybindings manager so legacy,
+			// kitty CSI-u, and user-customized bindings all work without
+			// importing pi-tui.
 			if (mode === "browse") {
 				const len = visible().length;
-				if (data === "\r" || data === "\n") {
+				if (kb.matches(data, "tui.select.confirm")) {
 					if (len > 0) {
 						mode = "menu";
 						menuIndex = 0;
@@ -611,11 +619,11 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 					}
 					return;
 				}
-				if (data === "\x1b") {
+				if (kb.matches(data, "tui.select.cancel")) {
 					done(null);
 					return;
 				}
-				if (data === "\x7f" || data === "\x08") {
+				if (kb.matches(data, "tui.editor.deleteCharBackward")) {
 					filter = filter.slice(0, -1);
 					index = clampIndex(index, visible().length);
 					refresh();
@@ -627,13 +635,23 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 					refresh();
 					return;
 				}
-				if (isArrow(data, "up")) {
+				if (kb.matches(data, "tui.select.up")) {
 					index = clampIndex(index - 1, len);
 					refresh();
 					return;
 				}
-				if (isArrow(data, "down")) {
+				if (kb.matches(data, "tui.select.down")) {
 					index = clampIndex(index + 1, len);
+					refresh();
+					return;
+				}
+				if (kb.matches(data, "tui.select.pageUp")) {
+					index = clampIndex(index - MAX_ROWS, len);
+					refresh();
+					return;
+				}
+				if (kb.matches(data, "tui.select.pageDown")) {
+					index = clampIndex(index + MAX_ROWS, len);
 					refresh();
 					return;
 				}
@@ -642,7 +660,7 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 			if (mode === "menu") {
 				const d = currentDraft();
 				if (!d) return;
-				if (data === "\r" || data === "\n") {
+				if (kb.matches(data, "tui.select.confirm")) {
 					if (menuIndex === 2) {
 						mode = "confirmDelete";
 						confirmIndex = 0;
@@ -652,21 +670,21 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 					done(`${menuIndex === 0 ? "load" : "edit"}:${d.meta.name}`);
 					return;
 				}
-				if (isArrow(data, "left")) {
+				if (kb.matches(data, "tui.editor.cursorLeft")) {
 					mode = "browse";
 					refresh();
 					return;
 				}
-				if (data === "\x1b") {
+				if (kb.matches(data, "tui.select.cancel")) {
 					done(null);
 					return;
 				}
-				if (isArrow(data, "up")) {
+				if (kb.matches(data, "tui.select.up")) {
 					menuIndex = (menuIndex + 2) % 3;
 					refresh();
 					return;
 				}
-				if (isArrow(data, "down")) {
+				if (kb.matches(data, "tui.select.down")) {
 					menuIndex = (menuIndex + 1) % 3;
 					refresh();
 					return;
@@ -676,7 +694,7 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 			// confirmDelete
 			const d2 = currentDraft();
 			if (!d2) return;
-			if (data === "\r" || data === "\n") {
+			if (kb.matches(data, "tui.select.confirm")) {
 				if (confirmIndex === 1) {
 					done(`delete:${d2.meta.name}`);
 				} else {
@@ -685,16 +703,16 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 				}
 				return;
 			}
-			if (isArrow(data, "left")) {
+			if (kb.matches(data, "tui.editor.cursorLeft")) {
 				mode = "menu";
 				refresh();
 				return;
 			}
-			if (data === "\x1b") {
+			if (kb.matches(data, "tui.select.cancel")) {
 				done(null);
 				return;
 			}
-			if (isArrow(data, "up") || isArrow(data, "down")) {
+			if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down")) {
 				confirmIndex = 1 - confirmIndex;
 				refresh();
 				return;

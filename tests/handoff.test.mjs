@@ -195,6 +195,22 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(only.title === "only title", "parseTitle handles a title-only response");
 }
 
+// Stand-in for the pi keybindings manager: maps action ids to the key
+// sequences pi's matchesKey would accept (legacy, app-cursor, kitty CSI-u).
+function mockKeybindings() {
+	const KEYS = {
+		"tui.select.up": ["\x1b[A", "\x1bOA", "\x1b[57419u"],
+		"tui.select.down": ["\x1b[B", "\x1bOB", "\x1b[57420u"],
+		"tui.select.pageUp": ["\x1b[5~"],
+		"tui.select.pageDown": ["\x1b[6~"],
+		"tui.select.confirm": ["\r", "\n", "\x1b[13u"],
+		"tui.select.cancel": ["\x1b", "\x1b[27u"],
+		"tui.editor.cursorLeft": ["\x1b[D", "\x1bOD", "\x1b[57417u"],
+		"tui.editor.deleteCharBackward": ["\x7f", "\x08", "\x1b[127u"],
+	};
+	return { matches: (data, id) => (KEYS[id] ?? []).includes(data) };
+}
+
 // --- draft picker navigation (mock ui.custom, pure string rendering) ----------
 
 {
@@ -214,7 +230,7 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 				factoryResult = factory(
 					{ requestRender() {} },
 					{ fg: (_c, s) => s },
-					{},
+					mockKeybindings(),
 					(v) => { doneValue = v; },
 				);
 				return null;
@@ -292,7 +308,7 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	let factoryResult = null;
 	const mockCtx = {
 		cwd: PK,
-		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, {}, () => {}); return null; } },
+		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, mockKeybindings(), () => {}); return null; } },
 	};
 	await showDraftPicker(mockCtx, listDrafts(PK));
 	const comp = factoryResult;
@@ -326,7 +342,7 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	let factoryResult = null;
 	const mockCtx = {
 		cwd: PK,
-		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, {}, () => {}); return null; } },
+		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, mockKeybindings(), () => {}); return null; } },
 	};
 	await showDraftPicker(mockCtx, listDrafts(PK));
 	const comp = factoryResult;
@@ -340,5 +356,100 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	const srcLine = lines.find((l) => l.includes("source:"));
 	assert(srcLine !== undefined && vw(srcLine) <= 60, "source line is visible-width truncated");
 }
+// --- picker keys are routed through the keybindings manager (kitty CSI-u) -----
+
+{
+	const PK = join(WORK, "picker5");
+	mkdirSync(PK, { recursive: true });
+	writeDraft(PK, "20260115-1430.md", { name: "20260115-1430.md", goal: "fix the tests", title: "Fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s", model: "m" }, "A");
+	writeDraft(PK, "20260116-0900.md", { name: "20260116-0900.md", goal: "deploy the app", title: "Deploy the app", created: "2026-01-16T09:00:00.000Z", source: "s", model: "m" }, "B");
+	let factoryResult = null;
+	let doneValue = undefined;
+	const mockCtx = {
+		cwd: PK,
+		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, mockKeybindings(), (v) => { doneValue = v; }); return null; } },
+	};
+	await showDraftPicker(mockCtx, listDrafts(PK)); // sorted: B (newer) first
+	const comp = factoryResult;
+
+	// kitty CSI-u arrows: down = ESC[57420u, up = ESC[57419u
+	comp.handleInput("\x1b[57420u");
+	let lines = comp.render(60);
+	assert(lines.some((l) => l.startsWith("> 2 |")), "kitty CSI-u down arrow moves selection");
+	comp.handleInput("\x1b[57419u");
+	lines = comp.render(60);
+	assert(lines.some((l) => l.startsWith("> 1 |")), "kitty CSI-u up arrow moves selection");
+
+	// application-cursor-mode arrow: down = ESC OB
+	comp.handleInput("\x1bOB");
+	lines = comp.render(60);
+	assert(lines.some((l) => l.startsWith("> 2 |")), "app-cursor-mode down arrow moves selection");
+
+	// page up/down
+	comp.handleInput("\x1b[6~"); // page down
+	lines = comp.render(60);
+	assert(lines.some((l) => l.startsWith("> 2 |")), "page down moves selection");
+	comp.handleInput("\x1b[5~"); // page up
+	lines = comp.render(60);
+	assert(lines.some((l) => l.startsWith("> 1 |")), "page up moves selection");
+
+	// kitty CSI-u enter (ESC[13u) opens the action menu
+	comp.handleInput("\x1b[13u");
+	lines = comp.render(60);
+	assert(lines.some((l) => l.includes("> Load")), "kitty CSI-u enter opens the action menu");
+
+	// kitty CSI-u escape (ESC[27u) cancels from the menu
+	comp.handleInput("\x1b[27u");
+	assert(doneValue === null, "kitty CSI-u escape cancels the picker");
+}
+
+// --- kitty CSI-u backspace clears the filter -----------------------------------
+
+{
+	const PK = join(WORK, "picker6");
+	mkdirSync(PK, { recursive: true });
+	writeDraft(PK, "20260115-1430.md", { name: "20260115-1430.md", goal: "fix the tests", title: "Fix the tests", created: "2026-01-15T14:30:00.000Z", source: "s", model: "m" }, "A");
+	let factoryResult = null;
+	const mockCtx = {
+		cwd: PK,
+		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, mockKeybindings(), () => {}); return null; } },
+	};
+	await showDraftPicker(mockCtx, listDrafts(PK));
+	const comp = factoryResult;
+	comp.handleInput("f"); // filter: "fix the tests" matches
+	comp.handleInput("\x1b[127u"); // kitty CSI-u backspace
+	const lines = comp.render(60);
+	assert(lines[0].includes("(1)") && !lines[0].includes("filter"), "kitty CSI-u backspace clears the filter");
+}
+
+// --- emoji goals: no lone surrogates and correct width in rendered lines -------
+
+{
+	function vw(s) {
+		const plain = s.split("\x1b").join(" ").replace(/\[[0-9;]*m/g, "");
+		let n = 0;
+		for (const ch of plain) n += ch.codePointAt(0) > 0x2e7f ? 2 : 1;
+		return n;
+	}
+	const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+	const PK = join(WORK, "picker7");
+	mkdirSync(PK, { recursive: true });
+	// A: emoji at the 40-char goalLine cut; B: emoji at the 60-col fit cut
+	writeDraft(PK, "20260117-1200.md", { name: "20260117-1200.md", goal: "a".repeat(39) + "\u{1F680}" + "b".repeat(30), title: "t", created: "2026-01-17T12:00:00.000Z", source: "s", model: "m" }, "A");
+	writeDraft(PK, "20260118-1200.md", { name: "20260118-1200.md", goal: "a".repeat(52) + "\u{1F680}" + "b".repeat(30), title: "t", created: "2026-01-18T12:00:00.000Z", source: "s", model: "m" }, "B");
+	let factoryResult = null;
+	const mockCtx = {
+		cwd: PK,
+		ui: { custom: async (factory) => { factoryResult = factory({ requestRender() {} }, { fg: (_c, s) => s }, mockKeybindings(), () => {}); return null; } },
+	};
+	await showDraftPicker(mockCtx, listDrafts(PK));
+	const comp = factoryResult;
+	for (const width of [40, 59, 60, 61, 80, 130]) {
+		const lines = comp.render(width);
+		assert(lines.every((l) => !loneSurrogate.test(l)), `no lone surrogate at width ${width}`);
+		assert(Math.max(...lines.map(vw)) <= width, `emoji lines stay within width ${width}`);
+	}
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
