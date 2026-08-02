@@ -361,10 +361,23 @@ console.log("Test 12: @rules in imported files affects only their subtree");
   assert(n[1].includes("No RULES.md"), "show without rules → error notify");
 
   writeFileSync(join(TMP, "RULES.md"), "- fresh rule\n");
+  // The lazy pi-tui import only resolves when @earendil-works/pi-tui is
+  // installed (devDependency). Probe it so both states are covered: with it
+  // the custom window path runs; without it rules degrades to the text
+  // report (the original plain-Node behavior).
+  let piTuiResolvable = false;
+  try {
+    await import("@earendil-works/pi-tui");
+    piTuiResolvable = true;
+  } catch {}
   let customRan = false;
   await commands.rules.handler("show", { cwd: TMP, hasUI: true, mode: "tui", ui: { notify: (m, t) => { n = [t, m]; }, custom: () => { customRan = true; } }, reload: async () => {} });
-  assert(n[0] === "info" && n[1].includes("Rules: 1 file(s)"), "plain-Node lazy import fails → text report");
-  assert(!customRan, "custom never invoked on degrade");
+  if (piTuiResolvable) {
+    assert(customRan, "custom window invoked when pi-tui resolves");
+  } else {
+    assert(n[0] === "info" && n[1].includes("Rules: 1 file(s)"), "plain-Node lazy import fails → text report");
+    assert(!customRan, "custom never invoked on degrade");
+  }
 }
 
 // restore env
