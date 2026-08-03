@@ -43,6 +43,10 @@
  *   7. .pi/handoffs/.gitignore is auto-created with "*" + "!.gitignore"
  *      (same pattern as .pi/git/.gitignore), so generated drafts are
  *      never tracked by git by default; a user-customized file is kept.
+ *   8. Generation guards: thinking blocks are stripped from the serialized
+ *      conversation, the text is capped (newest context kept), and the model's
+ *      response is validated against transcript echoes / oversize output with
+ *      one reinforced retry before it is accepted as a handoff prompt.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -58,8 +62,9 @@ const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversatio
 3. Lists files that were discussed or modified, each with a one-line note on its role or status. Do NOT paste file contents; the new thread can read the files itself
 4. Clearly states the next task based on the user's goal. If the goal is vague, infer the most likely next step from the conversation
 5. Is self-contained - the new thread should be able to proceed without the old conversation
+6. Never copies the conversation history below - it is provided as reference only. Do not quote, echo, or repeat any line from it; write a fresh summary in your own words
 
-Format your response as a prompt the user can send to start the new thread. Start directly with "## Context" - no preamble like "Here's the prompt". Write in the same language as the user's goal text; keep code, file names, and identifiers in their original form.
+Format your response as a prompt the user can send to start the new thread. Start directly with "## Context" - no preamble like "Here's the prompt". Write in the same language as the user's goal text; keep code, file names, and identifiers in their original form. Keep the whole prompt under 1500 words - a focused handoff prompt is short.
 
 Example output format:
 ## Context
@@ -84,6 +89,9 @@ End your response with the Title line after a blank line - it is the only thing 
 - Same language as the goal, at most 60 characters
 - Summarizes the next task (what the new thread will do), not the old session's history
 - Nothing may follow the Title line`;
+
+/** Reinforced instruction used for the retry when the first attempt was rejected by handoffOutputProblem. */
+const REINFORCED_SYSTEM_PROMPT = `${SYSTEM_PROMPT}\n\nYour previous attempt was rejected because it echoed the conversation history or produced invalid content. Respond with ONLY the handoff prompt itself, starting with "## Context", in at most 1500 words. Do not copy, quote, or repeat any line from the conversation history.`;
 // ============================================================================
 // Draft store (pure Node - testable without the pi runtime)
 // ============================================================================
@@ -278,11 +286,58 @@ export function parseTitle(prompt: string, fallback: string): { title: string; b
 		if (titleLine(lines[i])) return stripAt(i);
 		break; // last non-empty line is not a title - stop scanning
 	}
-	// Fallback: any Title: line in the text (model put it at the top).
-	for (let i = 0; i < lines.length; i++) {
-		if (titleLine(lines[i])) return stripAt(i);
-	}
+	// Fallback: the title as the very first line (model put it at the top). A
+	// Title:-looking line deeper in the text is echoed content, not a title -
+	// never strip it from the body.
+	if (lines.length > 0 && titleLine(lines[0])) return stripAt(0);
 	return { title: sanitizeTitle(fallback), body: prompt };
+}
+
+// ============================================================================
+// Generation guards (pure Node - testable without the pi runtime)
+// ============================================================================
+
+/** Default cap for the serialized conversation text sent to the model. */
+export const MAX_CONVERSATION_CHARS = 60_000;
+
+/** Default cap for the generated prompt; longer responses are transcript echoes. */
+export const MAX_PROMPT_CHARS = 15_000;
+
+/**
+ * Drop thinking content blocks from assistant messages. Internal reasoning
+ * traces are the bulk of long conversations and are not needed for a handoff
+ * summary; removing them keeps the summarization request small and focused.
+ */
+export function stripThinking(messages: Message[]): Message[] {
+	return messages.map((m) => {
+		if (m.role !== "assistant") return m;
+		return { ...m, content: m.content.filter((c) => c.type !== "thinking") };
+	});
+}
+
+/**
+ * Cap the serialized conversation at maxChars, keeping the newest context
+ * (the part a handoff summary needs most). Older context is dropped with an
+ * ASCII marker so the model knows the history was truncated.
+ */
+export function capConversationText(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const dropped = text.length - maxChars;
+	return `[... ${dropped} characters of older context truncated ...]\n\n${text.slice(-maxChars)}`;
+}
+
+/**
+ * Gate for the model's response: return a short ASCII reason when the output
+ * is unusable (empty, a verbatim echo of the serialized conversation, or
+ * absurdly long), null when it looks like a real handoff prompt. The
+ * serialized markers and tool-call XML must never appear in a summary.
+ */
+export function handoffOutputProblem(text: string, maxChars = MAX_PROMPT_CHARS): string | null {
+	if (text.trim() === "") return "empty response";
+	if (text.length > maxChars) return `response too long (${text.length} chars)`;
+	if (/\[(?:User|Assistant|Assistant tool calls|Assistant thinking|Tool result)\]:/.test(text)) return "conversation transcript echoed";
+	if (/<begin>|<end>|<tool_calls>|<invoke name=/.test(text)) return "conversation transcript echoed";
+	return null;
 }
 
 // ============================================================================
@@ -358,8 +413,8 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 		import("@earendil-works/pi-ai"),
 	]);
 
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const llmMessages = stripThinking(convertToLlm(messages));
+	const conversationText = capConversationText(serializeConversation(llmMessages), MAX_CONVERSATION_CHARS);
 
 	// Track failures so the user can distinguish a real error from a manual cancel.
 	let generationError: string | undefined;
@@ -384,27 +439,37 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 				timestamp: Date.now(),
 			};
 
-			const response = await complete(
-				ctx.model!,
-				{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-				{
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					env: auth.env,
-					signal: loader.signal,
-					cacheRetention: "none",
-					sessionId: uuidv7(),
-				},
-			);
+			// One retry with a reinforced instruction when the first attempt
+			// degenerates into an echo of the conversation (handoffOutputProblem).
+			let lastProblem: string | undefined;
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const response = await complete(
+					ctx.model!,
+					{ systemPrompt: attempt === 0 ? SYSTEM_PROMPT : REINFORCED_SYSTEM_PROMPT, messages: [userMessage] },
+					{
+						apiKey: auth.apiKey,
+						headers: auth.headers,
+						env: auth.env,
+						signal: loader.signal,
+						cacheRetention: "none",
+						sessionId: uuidv7(),
+					},
+				);
 
-			if (response.stopReason === "aborted") {
-				return null;
+				if (response.stopReason === "aborted") {
+					return null;
+				}
+
+				const text = response.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n");
+
+				const problem = response.stopReason === "length" ? "response truncated (output limit reached)" : handoffOutputProblem(text);
+				if (problem === null) return text;
+				lastProblem = problem;
 			}
-
-			return response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
+			throw new Error(`invalid model output: ${lastProblem}`);
 		};
 
 		doGenerate()

@@ -29,6 +29,9 @@ const {
 	showDraftPicker,
 	ensureDraftDir,
 	DRAFT_GITIGNORE,
+	stripThinking,
+	capConversationText,
+	handoffOutputProblem,
 } = mod;
 
 let pass = 0, fail = 0;
@@ -241,6 +244,64 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(long.title.length === 60, "parseTitle truncates titles to 60 chars");
 	const only = parseTitle("Title: only title\n", "fb");
 	assert(only.title === "only title", "parseTitle handles a title-only response");
+}
+
+{
+	// a Title:-looking line deep in the body (e.g. echoed content) is not stripped
+	const input = "## Context\nwork\nTitle: old session title\n## Task\ndo it\n";
+	const { title, body } = parseTitle(input, "fallback goal");
+	assert(title === "fallback goal", "parseTitle ignores a mid-body Title line (echoed content)");
+	assert(body === input, "parseTitle keeps the body untouched when no title at head/tail");
+}
+
+// --- generation guards: stripThinking / capConversationText / handoffOutputProblem ---
+
+{
+	// stripThinking drops thinking blocks from assistant messages, keeps the rest
+	const msgs = [
+		{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 },
+		{
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "internal reasoning" },
+				{ type: "text", text: "visible" },
+				{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
+			],
+			timestamp: 2,
+		},
+	];
+	const stripped = stripThinking(msgs);
+	assert(stripped[0] === msgs[0], "stripThinking leaves user messages untouched");
+	const a = stripped[1];
+	assert(a.content.length === 2, "stripThinking removes thinking blocks");
+	assert(a.content.every((c) => c.type !== "thinking"), "stripThinking drops all thinking blocks");
+	assert(a.content.some((c) => c.type === "text" && c.text === "visible"), "stripThinking keeps assistant text");
+	assert(a.content.some((c) => c.type === "toolCall"), "stripThinking keeps tool calls");
+}
+
+{
+	// capConversationText keeps the newest context within the budget
+	const short = "## Conversation History\nshort";
+	assert(capConversationText(short, 1000) === short, "capConversationText passes short text through");
+	const long = "x".repeat(500);
+	const capped = capConversationText(long, 100);
+	assert(capped.endsWith("x".repeat(100)), "capConversationText keeps the tail (newest context)");
+	assert(/^\[\.\.\. \d+ characters of older context truncated \.\.\.\]/.test(capped), "capConversationText marks the truncation in ASCII");
+}
+
+{
+	// handoffOutputProblem gates transcript echoes and oversized responses
+	assert(handoffOutputProblem("") !== null, "empty response is rejected");
+	assert(handoffOutputProblem("## Context\nwe fixed X\n## Task\ndo Y") === null, "normal summary passes");
+	assert(handoffOutputProblem("[User]: pick a module") !== null, "echoed [User]: line is rejected");
+	assert(handoffOutputProblem("[Tool result]: ok") !== null, "echoed [Tool result]: line is rejected");
+	assert(handoffOutputProblem("[Assistant tool calls]: bash()") !== null, "echoed [Assistant tool calls]: line is rejected");
+	assert(handoffOutputProblem("[Assistant thinking]: hmm") !== null, "echoed [Assistant thinking]: line is rejected");
+	assert(handoffOutputProblem("before <begin> after") !== null, "transcript begin marker is rejected");
+	assert(handoffOutputProblem("<end>") !== null, "transcript end marker is rejected");
+	assert(handoffOutputProblem('<tool_calls><invoke name="bash">') !== null, "tool-call XML is rejected");
+	assert(handoffOutputProblem("x".repeat(20000)) !== null, "oversized response is rejected");
+	assert(handoffOutputProblem("ok".repeat(7500)) === null, "response at the limit passes");
 }
 
 // Stand-in for the pi keybindings manager: maps action ids to the key
