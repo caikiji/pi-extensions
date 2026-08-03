@@ -37,16 +37,18 @@
  *      "Title:" as its final line (strictly constrained: one line, plain
  *      text, <= 60 chars, same language as the goal). The title is stripped
  *      from the prompt, stored in the draft front matter, and applied to the
- *      new session via pi.setSessionName() inside withSession (runtime
- *      actions are re-bound to the replacement session before withSession
- *      runs). The goal is the fallback when the model omits the line.
+ *      new session via replacementCtx.sessionManager.appendSessionInfo()
+ *      inside withSession - the outer ctx/pi API is stale after the switch
+ *      and must not be touched there. The goal is the fallback when the
+ *      model omits the line.
  *   7. .pi/handoffs/.gitignore is auto-created with "*" + "!.gitignore"
  *      (same pattern as .pi/git/.gitignore), so generated drafts are
  *      never tracked by git by default; a user-customized file is kept.
- *   8. Generation guards: thinking blocks are stripped from the serialized
- *      conversation, the text is capped (newest context kept), and the model's
- *      response is validated against transcript echoes / oversize output with
- *      one reinforced retry before it is accepted as a handoff prompt.
+ *   8. Generation guards: the full current branch (thinking chains included,
+ *      like a fork - reasoning holds accumulated experience) is serialized,
+ *      capped to the newest context when huge, and the model's response is
+ *      validated against transcript echoes / oversize output with one
+ *      reinforced retry before it is accepted as a handoff prompt.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -304,18 +306,6 @@ export const MAX_CONVERSATION_CHARS = 60_000;
 export const MAX_PROMPT_CHARS = 15_000;
 
 /**
- * Drop thinking content blocks from assistant messages. Internal reasoning
- * traces are the bulk of long conversations and are not needed for a handoff
- * summary; removing them keeps the summarization request small and focused.
- */
-export function stripThinking(messages: Message[]): Message[] {
-	return messages.map((m) => {
-		if (m.role !== "assistant") return m;
-		return { ...m, content: m.content.filter((c) => c.type !== "thinking") };
-	});
-}
-
-/**
  * Cap the serialized conversation at maxChars, keeping the newest context
  * (the part a handoff summary needs most). Older context is dropped with an
  * ASCII marker so the model knows the history was truncated.
@@ -413,7 +403,7 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 		import("@earendil-works/pi-ai"),
 	]);
 
-	const llmMessages = stripThinking(convertToLlm(messages));
+	const llmMessages = convertToLlm(messages);
 	const conversationText = capConversationText(serializeConversation(llmMessages), MAX_CONVERSATION_CHARS);
 
 	// Track failures so the user can distinguish a real error from a manual cancel.
@@ -517,16 +507,18 @@ function saveDraftFor(ctx: ExtensionCommandContext, goal: string, title: string,
 
 /**
  * Create the new session with the final prompt staged in the editor and a
- * display name. Runtime actions are re-bound to the replacement session
- * before withSession runs, so pi.setSessionName() names the new session.
+ * display name. Inside withSession only the replacement ctx is usable - the
+ * outer command ctx (and the pi API captured by the handler) is stale after
+ * the session switch, and touching it throws (which the TUI escalates to
+ * process.exit). The name is written via the replacement ctx's sessionManager.
  */
-async function startNewSession(ctx: ExtensionCommandContext, prompt: string, title: string, pi: ExtensionAPI): Promise<void> {
+async function startNewSession(ctx: ExtensionCommandContext, prompt: string, title: string): Promise<void> {
 	const currentSessionFile = ctx.sessionManager.getSessionFile();
 	const newSessionResult = await ctx.newSession({
 		parentSession: currentSessionFile,
 		withSession: async (replacementCtx) => {
 			replacementCtx.ui.setEditorText(prompt);
-			pi.setSessionName(title);
+			replacementCtx.sessionManager.appendSessionInfo(title);
 			replacementCtx.ui.notify("Handoff ready. Submit when ready.", "info");
 		},
 	});
@@ -536,7 +528,7 @@ async function startNewSession(ctx: ExtensionCommandContext, prompt: string, tit
 }
 
 /** /handoff [goal]: goal editor when empty, then generate -> auto-save -> review -> hand off. */
-async function handleGoal(ctx: ExtensionCommandContext, goal: string, pi: ExtensionAPI): Promise<void> {
+async function handleGoal(ctx: ExtensionCommandContext, goal: string): Promise<void> {
 	if (!ctx.model) {
 		ctx.ui.notify("No model selected", "error");
 		return;
@@ -562,18 +554,18 @@ async function handleGoal(ctx: ExtensionCommandContext, goal: string, pi: Extens
 	if (edited === undefined) {
 		return;
 	}
-	await startNewSession(ctx, edited, title, pi);
+	await startNewSession(ctx, edited, title);
 }
 
 /** Review a draft in the editor, then hand off with the (possibly edited) text. */
-async function editThenHandoff(ctx: ExtensionCommandContext, draft: HandoffDraft, pi: ExtensionAPI): Promise<void> {
+async function editThenHandoff(ctx: ExtensionCommandContext, draft: HandoffDraft): Promise<void> {
 	const edited = await ctx.ui.editor("Review handoff prompt", draft.content);
 	if (edited === undefined) {
 		ctx.ui.notify("Cancelled", "info");
 		return;
 	}
 	// Legacy drafts (no title front matter) fall back to the goal.
-	await startNewSession(ctx, edited, draft.meta.title || draft.meta.goal, pi);
+	await startNewSession(ctx, edited, draft.meta.title || draft.meta.goal);
 }
 
 function isPrintable(data: string): boolean {
@@ -808,7 +800,7 @@ export async function showDraftPicker(ctx: ExtensionCommandContext, drafts: Hand
 	});
 }
 /** /handoff list: pick a draft, then Load / Edit / Delete. */
-async function handleList(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+async function handleList(ctx: ExtensionCommandContext): Promise<void> {
 	const drafts = listDrafts(ctx.cwd);
 	if (drafts.length === 0) {
 		ctx.ui.notify("No drafts saved yet", "info");
@@ -827,7 +819,7 @@ async function handleList(ctx: ExtensionCommandContext, pi: ExtensionAPI): Promi
 	}
 
 	if (op === "load") {
-		await editThenHandoff(ctx, draft, pi);
+		await editThenHandoff(ctx, draft);
 		return;
 	}
 	if (op === "edit") {
@@ -857,9 +849,9 @@ export default function (pi: ExtensionAPI) {
 				ensureDraftDir(ctx.cwd);
 				const action = parseHandoffArgs(args);
 				if (action.kind === "goal") {
-					await handleGoal(ctx, action.goal, pi);
+					await handleGoal(ctx, action.goal);
 				} else {
-					await handleList(ctx, pi);
+					await handleList(ctx);
 				}
 			} catch (err) {
 				ctx.ui.notify(`handoff error: ${err instanceof Error ? err.message : String(err)}`, "error");

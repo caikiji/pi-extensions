@@ -29,7 +29,6 @@ const {
 	showDraftPicker,
 	ensureDraftDir,
 	DRAFT_GITIGNORE,
-	stripThinking,
 	capConversationText,
 	handoffOutputProblem,
 } = mod;
@@ -254,30 +253,7 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(body === input, "parseTitle keeps the body untouched when no title at head/tail");
 }
 
-// --- generation guards: stripThinking / capConversationText / handoffOutputProblem ---
-
-{
-	// stripThinking drops thinking blocks from assistant messages, keeps the rest
-	const msgs = [
-		{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 },
-		{
-			role: "assistant",
-			content: [
-				{ type: "thinking", thinking: "internal reasoning" },
-				{ type: "text", text: "visible" },
-				{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
-			],
-			timestamp: 2,
-		},
-	];
-	const stripped = stripThinking(msgs);
-	assert(stripped[0] === msgs[0], "stripThinking leaves user messages untouched");
-	const a = stripped[1];
-	assert(a.content.length === 2, "stripThinking removes thinking blocks");
-	assert(a.content.every((c) => c.type !== "thinking"), "stripThinking drops all thinking blocks");
-	assert(a.content.some((c) => c.type === "text" && c.text === "visible"), "stripThinking keeps assistant text");
-	assert(a.content.some((c) => c.type === "toolCall"), "stripThinking keeps tool calls");
-}
+// --- generation guards: capConversationText / handoffOutputProblem ---
 
 {
 	// capConversationText keeps the newest context within the budget
