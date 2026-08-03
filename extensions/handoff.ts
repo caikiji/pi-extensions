@@ -44,11 +44,12 @@
  *   7. .pi/handoffs/.gitignore is auto-created with "*" + "!.gitignore"
  *      (same pattern as .pi/git/.gitignore), so generated drafts are
  *      never tracked by git by default; a user-customized file is kept.
- *   8. Generation guards: the full current branch (thinking chains included,
- *      like a fork - reasoning holds accumulated experience) is serialized,
- *      capped to the newest context when huge, and the model's response is
- *      validated against transcript echoes / oversize output with one
- *      reinforced retry before it is accepted as a handoff prompt.
+ *   8. Generation guards: the real message list (thinking chains included,
+ *      like /fork keeps the branch) is passed to the model as-is - the goal
+ *      is appended as the final user message, with a token budget as the
+ *      only safety net. The response is validated against transcript
+ *      echoes / oversize output with one reinforced retry before it is
+ *      accepted as a handoff prompt.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -299,21 +300,40 @@ export function parseTitle(prompt: string, fallback: string): { title: string; b
 // Generation guards (pure Node - testable without the pi runtime)
 // ============================================================================
 
-/** Default cap for the serialized conversation text sent to the model. */
-export const MAX_CONVERSATION_CHARS = 60_000;
 
 /** Default cap for the generated prompt; longer responses are transcript echoes. */
 export const MAX_PROMPT_CHARS = 15_000;
 
 /**
- * Cap the serialized conversation at maxChars, keeping the newest context
- * (the part a handoff summary needs most). Older context is dropped with an
- * ASCII marker so the model knows the history was truncated.
+ * Fit the conversation messages to a token budget for the generation call.
+ * The real message list (thinking chains, tool calls, and results included) is
+ * passed through as-is - no text serialization, like /fork keeps the branch.
+ * Keeps the newest messages within budgetTokens (estimated via the provided
+ * estimate fn) and repairs the list so it never starts or ends with an
+ * unterminated tool result.
  */
-export function capConversationText(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	const dropped = text.length - maxChars;
-	return `[... ${dropped} characters of older context truncated ...]\n\n${text.slice(-maxChars)}`;
+export function fitMessagesToBudget(messages: Message[], budgetTokens: number, estimate: (m: Message) => number): Message[] {
+	if (messages.length === 0) return messages;
+	// Drop trailing toolResult messages: nothing consumes them and a user goal
+	// message is appended after this list.
+	let end = messages.length - 1;
+	while (end >= 0 && messages[end].role === "toolResult") end--;
+	if (end < 0) return [];
+	// Keep the newest messages within the budget.
+	let total = 0;
+	let start = 0;
+	for (let i = end; i >= 0; i--) {
+		const t = estimate(messages[i]);
+		if (total + t > budgetTokens) {
+			start = i + 1;
+			break;
+		}
+		total += t;
+	}
+	// The first kept message must not be a lone toolResult whose assistant
+	// tool call was dropped with the older context.
+	if (start <= end && messages[start].role === "toolResult") start++;
+	return messages.slice(start, end + 1);
 }
 
 /**
@@ -397,14 +417,20 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 
 	// pi runtime packages are imported lazily so this module stays importable
 	// from pure Node test files (they never take this path).
-	const [{ convertToLlm, serializeConversation, BorderedLoader }, { complete }, { uuidv7 }] = await Promise.all([
+	const [{ convertToLlm, estimateTokens, BorderedLoader }, { complete }, { uuidv7 }] = await Promise.all([
 		import("@earendil-works/pi-coding-agent"),
 		import("@earendil-works/pi-ai/compat"),
 		import("@earendil-works/pi-ai"),
 	]);
 
+	// Pass the real message list (thinking chains, tool calls, results) through
+	// as-is - like /fork keeps the branch - and append the goal as the final
+	// user message. Only a token budget guards against exceeding the context
+	// window on very long sessions.
 	const llmMessages = convertToLlm(messages);
-	const conversationText = capConversationText(serializeConversation(llmMessages), MAX_CONVERSATION_CHARS);
+	const contextWindow = ctx.model?.contextWindow ?? 128_000;
+	const tokenBudget = Math.max(8_000, contextWindow - 20_000);
+	const history = fitMessagesToBudget(llmMessages, tokenBudget, estimateTokens);
 
 	// Track failures so the user can distinguish a real error from a manual cancel.
 	let generationError: string | undefined;
@@ -418,16 +444,12 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 				throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
 			}
 
-			const userMessage: Message = {
+			const goalMessage: Message = {
 				role: "user",
-				content: [
-					{
-						type: "text",
-						text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
-					},
-				],
+				content: [{ type: "text", text: `## User's Goal for New Thread\n\n${goal}` }],
 				timestamp: Date.now(),
 			};
+			const modelMessages = [...history, goalMessage];
 
 			// One retry with a reinforced instruction when the first attempt
 			// degenerates into an echo of the conversation (handoffOutputProblem).
@@ -435,7 +457,7 @@ async function generateHandoff(ctx: ExtensionCommandContext, goal: string): Prom
 			for (let attempt = 0; attempt < 2; attempt++) {
 				const response = await complete(
 					ctx.model!,
-					{ systemPrompt: attempt === 0 ? SYSTEM_PROMPT : REINFORCED_SYSTEM_PROMPT, messages: [userMessage] },
+					{ systemPrompt: attempt === 0 ? SYSTEM_PROMPT : REINFORCED_SYSTEM_PROMPT, messages: modelMessages },
 					{
 						apiKey: auth.apiKey,
 						headers: auth.headers,

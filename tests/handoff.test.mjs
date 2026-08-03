@@ -29,7 +29,7 @@ const {
 	showDraftPicker,
 	ensureDraftDir,
 	DRAFT_GITIGNORE,
-	capConversationText,
+	fitMessagesToBudget,
 	handoffOutputProblem,
 } = mod;
 
@@ -253,16 +253,25 @@ const CONTENT = "## Context\nstuff here\n## Task\ndo it";
 	assert(body === input, "parseTitle keeps the body untouched when no title at head/tail");
 }
 
-// --- generation guards: capConversationText / handoffOutputProblem ---
+// --- generation guards: fitMessagesToBudget / handoffOutputProblem ---
 
 {
-	// capConversationText keeps the newest context within the budget
-	const short = "## Conversation History\nshort";
-	assert(capConversationText(short, 1000) === short, "capConversationText passes short text through");
-	const long = "x".repeat(500);
-	const capped = capConversationText(long, 100);
-	assert(capped.endsWith("x".repeat(100)), "capConversationText keeps the tail (newest context)");
-	assert(/^\[\.\.\. \d+ characters of older context truncated \.\.\.\]/.test(capped), "capConversationText marks the truncation in ASCII");
+	// fitMessagesToBudget keeps the newest messages within the token budget
+	const est = (m) => (m.content?.[0]?.text ?? m.content?.[0]?.thinking ?? "").length;
+	const mk = (role, text) => ({ role, content: [{ type: "text", text }] });
+	const msgs = [mk("user", "old"), mk("assistant", "mid"), mk("user", "newest")];
+	const all = fitMessagesToBudget(msgs, 1000, est);
+	assert(all.length === 3, "fitMessagesToBudget passes everything within budget");
+	const trimmed = fitMessagesToBudget(msgs, 6, est);
+	assert(trimmed.length === 1 && trimmed[0].content[0].text === "newest", "fitMessagesToBudget keeps only the newest when over budget");
+	// a trailing toolResult is dropped (a user goal message follows it)
+	const withTrailingTool = [...msgs, { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "out" }] }];
+	const noTrailingTool = fitMessagesToBudget(withTrailingTool, 1000, est);
+	assert(noTrailingTool[noTrailingTool.length - 1].role !== "toolResult", "fitMessagesToBudget drops trailing toolResult messages");
+	// a lone toolResult at the kept boundary is dropped (its tool call is gone)
+	const boundaryMsgs = [mk("user", "old"), { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "res" }] }, mk("user", "newest")];
+	const boundary = fitMessagesToBudget(boundaryMsgs, 9, est);
+	assert(boundary.length === 1 && boundary[0].role === "user" && boundary[0].content[0].text === "newest", "fitMessagesToBudget drops a lone toolResult at the kept boundary");
 }
 
 {
