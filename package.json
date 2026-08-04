@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "0.17.4",
+  "version": "0.18.0",
   "description": "Personal pi extensions: handoff, rules",
   "type": "module",
   "keywords": [
